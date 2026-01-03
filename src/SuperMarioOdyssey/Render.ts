@@ -1196,17 +1196,17 @@ class FSHPInstance {
         const d = template.mapUniformBufferF32(AglProgram.ub_ShapeParams);
         offs += fillMatrix4x4(d, offs, viewerInput.camera.projectionMatrix);
         offs += fillMatrix4x3(d, offs, this.computeModelView(modelMatrix, viewerInput));
-        
+         
         // ub_MdlEnvView has camera, environment, and added ub_HDRTranslate data
-        template.allocateUniformBuffer(AglProgram.ub_MdlEnvView, 132);
+        const mdlEnvOffs = template.allocateUniformBuffer(AglProgram.ub_MdlEnvView, 132);
         const envData = template.mapUniformBufferF32(AglProgram.ub_MdlEnvView);
-        this.fillMdlEnvView(envData, 0, viewerInput, modelMatrix);
-        
+        this.fillMdlEnvView(envData, mdlEnvOffs, viewerInput, modelMatrix);
+         
         // ub_Material
-        template.allocateUniformBuffer(AglProgram.ub_Material, 200); // TODO: calculate right size
+        const matOffs = template.allocateUniformBuffer(AglProgram.ub_Material, 200); // TODO: calculate right size
         const matData = template.mapUniformBufferF32(AglProgram.ub_Material);
-        this.fmatInstance.fillMaterialParams(matData, 0);
-
+        this.fmatInstance.fillMaterialParams(matData, matOffs);
+ 
         // ub_ModelAdditionalInfo
         template.allocateUniformBuffer(AglProgram.ub_ModelAdditionalInfo, 16 + 16 + 8 + 64 + 64 + 64 + 64 + 16 + 16);
         const modelAddData = template.mapUniformBufferF32(AglProgram.ub_ModelAdditionalInfo);
