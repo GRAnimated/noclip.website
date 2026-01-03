@@ -48,7 +48,7 @@ import * as Scenes_InteractiveExamples from './InteractiveExamples/Scenes.js';
 import * as Scenes_Pilotwings64 from './Pilotwings64/Scenes.js';
 import * as Scenes_Fez from './Fez/Scenes_Fez.js';
 import * as Scenes_StarFoxAdventures from './StarFoxAdventures/scenes.js';
-import * as Scenes_SuperMarioOdyssey from './fres_nx/smo_scenes.js';
+import * as Scenes_SuperMarioOdyssey from './SuperMarioOdyssey/Scenes.js';
 import * as Scenes_GTA from './GrandTheftAuto3/scenes.js';
 import * as Scenes_SpongeBobBFBB from './HeavyIron/Scenes_BFBB.js';
 import * as Scenes_SpongeBobTSSM from './HeavyIron/Scenes_TSSM.js';
