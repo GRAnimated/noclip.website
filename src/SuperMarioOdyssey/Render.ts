@@ -13,7 +13,7 @@ import { GfxRenderInst, makeSortKey, GfxRendererLayer, setSortKeyDepth, GfxRende
 import { TextureAddressMode, FilterMode, IndexFormat, AttributeFormat, getChannelFormat, getTypeFormat } from '../fres_nx/nngfx_enum.js';
 import { nArray, assert, assertExists } from '../util.js';
 import { fillMatrix4x4, fillMatrix4x3 } from '../gfx/helpers/UniformBufferHelpers.js';
-import { mat4 } from 'gl-matrix';
+import { mat4, vec2, vec3, vec4 } from "gl-matrix";
 import { computeViewMatrix, computeViewSpaceDepthFromWorldSpaceAABB } from '../Camera.js';
 import { AABB } from '../Geometry.js';
 import { reverseDepthForCompareMode } from '../gfx/helpers/ReversedDepthHelpers.js';
@@ -26,6 +26,9 @@ import { GfxrAttachmentSlot } from '../gfx/render/GfxRenderGraph.js';
 import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { GfxShaderLibrary } from '../gfx/helpers/GfxShaderLibrary.js';
 import { createBufferFromData, createBufferFromSlice } from '../gfx/helpers/BufferHelpers.js';
+import { generateFragmentShader } from './Fragment.js';
+import { generateVertexShader } from './Vertex.js';
+import { generateShaderUtil } from './ShaderUtil.js';
 
 export class BRTITextureHolder extends TextureHolder {
     public addFRESTextures(device: GfxDevice, fres: FRES): void {
@@ -119,7 +122,60 @@ function translateTexFilterMode(filterMode: FilterMode): GfxTexFilterMode {
     }
 }
 
-class AglProgram extends DeviceProgram {
+class MdlEnvViewData {
+    public exposure = 1.0;
+    public dirLightDir = vec3.fromValues(-0.5, -0.5, -1.0);
+    public zNear = 0.1;
+    public zFar = 100000.0;
+    public cameraPos = vec3.create();
+}
+
+class MaterialParams {
+    public const_color0 = vec4.create();
+    public const_color1 = vec4.create();
+    public const_color2 = vec4.create();
+    public const_color3 = vec4.create();
+    
+    public const_single0 = 0.0;
+    public const_single1 = 0.0;
+    public const_single2 = 0.0;
+    public const_single3 = 0.0;
+    
+    public base_color_mul_color = vec4.fromValues(1, 1, 1, 1);
+    public uniform0_mul_color = vec4.fromValues(1, 1, 1, 1);
+    public uniform1_mul_color = vec4.fromValues(1, 1, 1, 1);
+    public uniform2_mul_color = vec4.fromValues(1, 1, 1, 1);
+    public uniform3_mul_color = vec4.fromValues(1, 1, 1, 1);
+    public uniform4_mul_color = vec4.fromValues(1, 1, 1, 1);
+    
+    // Texture matrices
+    public tex_mtx0: vec4[] = [vec4.create(), vec4.create()];
+    public tex_mtx1: vec4[] = [vec4.create(), vec4.create()];
+    public tex_mtx2: vec4[] = [vec4.create(), vec4.create()];
+    public tex_mtx3: vec4[] = [vec4.create(), vec4.create()];
+    
+    public displacement_scale = 0.0;
+    public displacement1_scale = 0.0;
+    public alpha_test_value = 0.5;
+    public force_roughness = 1.0;
+}
+
+class HDRTranslateData {
+    public power = 2.2;
+    public range = 1.0;
+}
+
+class ModelAdditionalInfo {
+    public model_alpha_mask = 1.0;
+    public normal_axis_x_scale = 1.0;
+    public uv_offset = vec2.create();
+    public proj_mtx0 = mat4.create();
+    public proj_mtx1 = mat4.create();
+    public proj_mtx2 = mat4.create();
+    public proj_mtx3 = mat4.create();
+}
+
+export class AglProgram extends DeviceProgram {
     public static _p0: number = 0;
     public static _c0: number = 1;
     public static _u0: number = 2;
@@ -128,6 +184,11 @@ class AglProgram extends DeviceProgram {
     public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0' ];
 
     public static ub_ShapeParams = 0;
+    public static ub_MdlEnvView = 1; // and ub_HDRTranslate
+    public static ub_Material = 2;
+    public static ub_ModelAdditionalInfo = 3;
+    // ub_MdlMtx  - bone matrices
+    // ub_Shp     - shape transform
 
     public isTranslucent: boolean = false;
 
@@ -148,7 +209,7 @@ class AglProgram extends DeviceProgram {
 
         this.isTranslucent = alphaIsTranslucent && !this.getShaderOptionBoolean(`enable_alphamask`);
 
-        this.frag = this.generateFrag();
+        this.frag = generateShaderUtil() + generateFragmentShader(this);
     }
 
     public static globalDefinitions = `
@@ -160,6 +221,107 @@ layout(std140) uniform ub_ShapeParams {
     Mat4x4 u_Projection;
     Mat3x4 u_ModelView;
 };
+
+layout(std140) uniform ub_MdlEnvView {
+    Mat3x4 cView;
+    Mat3x4 cViewInv;
+    Mat4x4 cViewProj;
+    Mat3x4 cInvProjView;
+    Mat4x4 cInvProj;
+    Mat3x4 uInvProjViewNoTrans;
+
+    float cInvExposure;
+    float uIrradianceScale;
+
+    // Directional light
+    vec4 cDirLightViewDirFetchPos;
+    
+    float cNear;
+    float cFar;
+    float cRange;
+    float cInvRange;
+    vec2 cTanFovyHalf;
+    vec2 cScrProjOffset;
+    vec4 cScrSize;
+    vec3 cCameraPos;
+
+    float HDRTranslate_uHDRPower;     // moved here due to reduce the amount of uniform buffers
+    float HDRTranslate_uDynamicRange;
+} mdlEnvView;
+
+layout(std140) uniform ub_Material {
+    vec4 const_color0;
+    vec4 const_color1;
+    vec4 const_color2;
+    vec4 const_color3;
+    float const_single0;
+    float const_single1;
+    float const_single2;
+    float const_single3;
+    vec4 base_color_mul_color;
+    vec4 uniform0_mul_color;
+    vec4 uniform1_mul_color;
+    vec4 uniform2_mul_color;
+    vec4 uniform3_mul_color;
+    vec4 uniform4_mul_color;
+    vec4 proc_texture_2d_mul_color;
+    vec4 proc_texture_3d_mul_color;
+    mat2x4 tex_mtx0;
+    mat2x4 tex_mtx1;
+    mat2x4 tex_mtx2;
+    mat2x4 tex_mtx3;
+    float displacement_scale;
+    float displacement1_scale;
+    vec2 padding;
+    vec4 displacement_color;
+    vec4 displacement1_color;
+    float wrap_coef;
+    float refract_thickness;
+    vec2 indirect0_scale;
+    vec2 indirect1_scale;
+    float alpha_test_value;
+    float force_roughness;
+    float sphere_rate_color0;
+    float sphere_rate_color1;
+    float sphere_rate_color2;
+    float sphere_rate_color3;
+    mat4 mirror_view_proj;
+    float decal_range;
+    float gbuf_fetch_offset;
+    float translucence_sharpness;
+    float translucence_sharpness_strength;
+    float translucence_factor;
+    float translucence_silhouette_stress;
+    float indirect_depth_scale;
+    float cloth_nov_peak_pos0;
+    float cloth_nov_peak_pow0;
+    float cloth_nov_peak_intensity0;
+    float cloth_nov_tone_pow0;
+    float cloth_nov_slope0;
+    float cloth_nov_emission_scale0;
+    vec3 cloth_nov_noise_mask_scale0;
+    vec4 proc_texture_3d_scale;
+    // vec4 flow0_param;
+    vec4 ripple_emission_color;
+    vec4 hack_color;
+    vec4 stain_color;
+    float stain_uv_scale;
+    float stain_rate;
+    float material_lod_roughness;
+    float material_lod_metalness;
+} mat;
+
+layout(std140) uniform ub_ModelAdditionalInfo {
+    float model_alpha_mask;
+    float normal_axis_x_scale;
+    vec2 uv_offset;
+    mat4 proj_mtx0;
+    mat4 proj_mtx1;
+    mat4 proj_mtx2;
+    mat4 proj_mtx3;
+    vec4 prog_constant0;
+    vec4 prog_constant1;
+} modelInfo;
 
 uniform sampler2D u_Texture0;
 uniform sampler2D u_Texture1;
@@ -197,25 +359,27 @@ uniform sampler2D u_Texture7;
     }
 
     public generateComponentMask(componentMask: number): string {
-        if (componentMask === 10)
-            return '.rgba';
-        else if (componentMask === 20)
-            return '.rrrr';
-        else if (componentMask === 30)
-            return '.g';
-        else if (componentMask === 50)
-            return '.rgba'; // ???
-        else if (componentMask === 60)
-            return '.a';
-        else
-            throw "whoops";
+        switch (componentMask) {
+            case 10: return '.rgba';
+            case 20: return '.rrrr';
+            case 30: return '.gggg';
+            case 40: return '.bbbb';
+            case 50: return '.aaaa';
+            case 60: return '.aaaa';
+            case 11: return '(1.0 - .rgba)';
+            case 21: return '(1.0 - .rrrr)';
+            case 31: return '(1.0 - .gggg)';
+            case 70: return 'clamp(1.0 - .rrrr, 0.0, 1.0)';
+            case 80: return 'clamp(1.0 - .gggg, 0.0, 1.0)';
+            default: return '.rgba';
+        }
     }
 
-    public genSample(shadingModelSamplerBindingName: string): string {
+    public genSample(shadingModelSamplerBindingName: string, uvIdx: number = 0): string {
         try {
             const samplerIndex = this.lookupSamplerIndex(shadingModelSamplerBindingName);
-            const uv = 'v_TexCoord0';
-            return `texture(SAMPLER_2D(u_Texture${samplerIndex}), ${uv})`;
+            const uv = `v_TexCoord${uvIdx}`;
+            return `texture(u_Texture${samplerIndex}, vec2(${uv}.x, 1.0 - ${uv}.y))`;
         } catch(e) {
             // TODO(jstpierre): Figure out wtf is going on.
             console.warn(`${this.name}: No sampler by name ${shadingModelSamplerBindingName}`);
@@ -223,11 +387,30 @@ uniform sampler2D u_Texture7;
         }
     }
 
-    public genBlend(instance: number) {
-        assert(this.getShaderOptionBoolean(`enable_blend${instance}`));
-        // For now, just use the src.
-        const src = `${this.genOutput(`blend${instance}_src`)}${this.genOutputCompMask(`blend${instance}_src_ch`)}`;
-        return src;
+    public genBlend(instance: number): string {
+        const enable = this.getShaderOptionBoolean(`enable_blend${instance}`);
+        if (!enable) return 'vec4(0.0)';
+
+        const srcId = `blend${instance}_src`;
+        const dstId = `blend${instance}_dst`;
+        const cofId = `blend${instance}_cof`;
+        const equation = this.getShaderOptionNumber(`blend${instance}_eq`);
+
+        const src = `${this.genOutput(srcId)}${this.genOutputCompMask(`blend${instance}_src_ch`)}`;
+        const dst = `${this.genOutput(dstId)}${this.genOutputCompMask(`blend${instance}_dst_ch`)}`;
+        const cof = `${this.genOutput(cofId)}${this.genOutputCompMask(`blend${instance}_cof_ch`)}`;
+
+        switch (equation) {
+            // fma(a, b, c) becomes ((a) * (b) + (c))
+            case 0: return `((${src} - ${dst}) * ${cof} + ${dst})`;
+            case 1: return `(${dst} * ${cof} + ${src})`;
+            case 2: return `(${dst} * ${cof} * ${src})`;
+            case 3: return `(${dst} * -${cof} + ${src})`;
+            case 4: return `(${dst} + ${cof} + ${src})`;
+            case 7: return `((${src} + ${dst}) * ${cof})`;
+            case 8: return `((${src} - ${dst}) * ${cof})`;
+            default: return src;
+        }
     }
 
     public genOutputCompMask(optionName: string): string {
@@ -237,145 +420,65 @@ uniform sampler2D u_Texture7;
     public genOutput(optionName: string): string {
         const n = this.getShaderOptionNumber(optionName);
 
-        // TODO(jstpierre): WaterConnectMT has "15" for a blend1_src, which is used in alpha.
-        // The material doesn't have *any* samplers with _a prefix. WTF?
-        if (n === 15)
-            return 'vec4(1.0)';
+        switch (n) {
+            case 10: return this.genSample('_a0'); // Base Color
+            case 15: return `v_VtxColor`;          // Vertex Color
+            case 20: return this.genSample('_n0'); // Normal Map
+            case 30: return `vec4(GetWorldNormal().xyz, 0.0)`; // World Normal
+            // Uniforms
+            case 50: return this.genSample('_u0');
+            case 51: return this.genSample('_u1');
+            case 52: return this.genSample('_u2');
+            case 53: return this.genSample('_u3');
+            case 54: return this.genSample('_u4');
+            
+            case 60: return `mat.const_color0`;     
+            case 61: return `mat.const_color1`;     
+            case 62: return `mat.const_color2`;     
+            case 63: return `mat.const_color3`;     
+            
+            case 70: return `texture(u_Texture0, v_TexCoord0)`; // TODO: FB sampler
+            case 78: return `texture(u_Texture1, v_TexCoord0)`; // TODO: Depth sampler
+            
+            case 80: return this.genBlend(0);
+            case 81: return this.genBlend(1);
+            case 82: return this.genBlend(2);
+            case 83: return this.genBlend(3);
+            case 84: return this.genBlend(4);
+            case 85: return this.genBlend(5);
 
-        const kind = assertExists((n / 10) | 0);
-        const instance = assertExists(n % 10);
-
-        if (kind === 1)
-            return this.genSample(`_a${instance}`);
-        else if (kind === 2 || kind === 3)
-            return this.genSample(`_n${instance}`);
-        else if (kind === 5)
-            return this.genSample(`_u${instance}`);
-        else if (kind === 6)
-            return `vec4(1.0)`; // TODO(jstpierre): What is this?
-        else if (kind === 7)
-            return `vec4(1.0)`; // TODO(jstpierre): What is this?
-        else if (kind === 8)
-            return this.genBlend(instance);
-        else if (kind === 10)
-            return `vec4(1.0)`; // TODO(jstpierre): What is this?
-        else if (kind === 11) {
-            if (instance === 0 || instance === 1 || instance === 2 || instance === 5)
-                return `vec4(0.0)`;
-            else if (instance === 6)
-                return `vec4(1.0)`;
-            else
-                throw "whoops";
-        } else
-            throw "whoops";
+            case 110: return `vec4(mat.const_single0)`;
+            case 111: return `vec4(mat.const_single1)`;
+            case 112: return `vec4(mat.const_single2)`;
+            case 113: return `vec4(mat.const_single3)`;
+            
+            case 115: return `vec4(0.0)`;
+            case 116: return `vec4(1.0)`;
+            case 140: return `vec4(modelInfo.uv_offset, 0.0, 0.0)`;
+            case 160: return `texture(u_Texture2, v_TexCoord0)`; // u_ProcTexture2D
+            case 170: return `texture(u_Texture3, v_PositionWorld * mat.proc_texture_3d_scale.xyz)`;
+            
+            default:
+                return `vec4(1.0, 0.0, 1.0, 1.0)`; 
+        }
     }
 
     public blendIsTranslucent(instance: number): boolean {
-        assert(this.getShaderOptionBoolean(`enable_blend${instance}`));
-        // For now, just use the src.
+        if (!this.getShaderOptionBoolean(`enable_blend${instance}`)) return false;
         return this.outputIsTranslucent(`blend${instance}_src`);
     }
 
     public outputIsTranslucent(optionName: string): boolean {
         const n = this.getShaderOptionNumber(optionName);
-
-        const kind = (n / 10) | 0;
-        const instance = (n % 10);
-
-        if (kind === 8)
-            return this.blendIsTranslucent(instance);
-        else if (kind === 11)
-            return instance !== 6;
-        else
-            return true;
+        // 115 is 0.0
+        // 116 is 1.0
+        // 116 is solid
+        if (n === 116) return false;
+        if (n >= 80 && n <= 85) return this.blendIsTranslucent(n - 80);
+        return true; 
     }
 
-    public override vert = `
-layout(location = ${AglProgram._p0}) in vec3 _p0;
-layout(location = ${AglProgram._c0}) in vec4 _c0;
-layout(location = ${AglProgram._u0}) in vec2 _u0;
-layout(location = ${AglProgram._n0}) in vec4 _n0;
-layout(location = ${AglProgram._t0}) in vec4 _t0;
-
-out vec3 v_PositionWorld;
-out vec2 v_TexCoord0;
-out vec4 v_VtxColor;
-
-out vec4 v_NormalWorld;
-out vec4 v_TangentWorld;
-
-void main() {
-    vec3 t_PositionView = UnpackMatrix(u_ModelView) * vec4(_p0, 1.0);
-    gl_Position = UnpackMatrix(u_Projection) * vec4(t_PositionView, 1.0);
-    v_PositionWorld = _p0.xyz;
-    v_TexCoord0 = _u0;
-    v_VtxColor = _c0;
-    v_NormalWorld = _n0;
-    v_TangentWorld = _t0;
-}
-`;
-
-    public generateFrag() {
-        return `
-precision mediump float;
-
-in vec3 v_PositionWorld;
-in vec2 v_TexCoord0;
-in vec4 v_VtxColor;
-in vec4 v_NormalWorld;
-in vec4 v_TangentWorld;
-
-void main() {
-    gl_FragColor = vec4(0.0);
-
-${this.condShaderOption(`enable_base_color`, () => `
-    vec4 o_base_color = ${this.genOutput(`o_base_color`)};
-    gl_FragColor += o_base_color;
-`)}
-
-    // TODO(jstpierre): When should o_alpha be used?
-    gl_FragColor.a = ${this.genOutput(`o_alpha`)}${this.genOutputCompMask(`alpha_component`)};
-
-// TODO(jstpierre): How does this interact with enable_base_color_mul_color
-#ifdef OPT_vtxcolor
-    gl_FragColor.rgb *= v_VtxColor.rgb;
-#endif
-
-${this.condShaderOption(`enable_normal`, () => `
-    vec3 t_Normal = v_NormalWorld.xyz;
-    vec3 t_Tangent = normalize(v_TangentWorld.xyz);
-    vec3 t_Bitangent = cross(t_Normal, t_Tangent) * v_TangentWorld.w;
-
-    // Perturb normal with map.
-    vec3 t_LocalNormal = vec3(${this.genOutput(`o_normal`)}.rg, 0);
-    float t_Len2 = 1.0 - t_LocalNormal.x*t_LocalNormal.x - t_LocalNormal.y*t_LocalNormal.y;
-    t_LocalNormal.z = sqrt(clamp(t_Len2, 0.0, 1.0));
-    vec3 t_NormalDir = (t_LocalNormal.x * t_Tangent + t_LocalNormal.y * t_Bitangent + t_LocalNormal.z * t_Normal);
-
-    vec3 t_LightDir = normalize(vec3(-0.5, -0.5, -1));
-    float t_LightIntensity = clamp(dot(t_LightDir, -t_NormalDir), 0.0, 1.0);
-    // Don't perturb that much.
-    t_LightIntensity = mix(0.6, 1.0, t_LightIntensity);
-
-    gl_FragColor.rgb *= t_LightIntensity;
-`)}
-
-${this.condShaderOption(`enable_alphamask`, () => `
-    // TODO(jstpierre): Dynamic alpha reference value (it should be in the shader params)
-    if (gl_FragColor.a <= 0.5)
-        discard;
-`)}
-
-${this.condShaderOption(`enable_emission`, () => `
-    vec4 o_emission = ${this.genOutput(`o_emission`)};
-    // gl_FragColor.rgb += o_emission.rgb;
-`)}
-
-    // Gamma correction.
-    gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(1.0 / 2.2));
-}
-`;
-    }
+    public override vert = generateShaderUtil() + generateVertexShader();
 }
 
 function translateRenderInfoSingleString(renderInfo: FMAT_RenderInfo): string {
@@ -449,6 +552,8 @@ class FMATInstance {
     private program: AglProgram;
     private gfxProgram: GfxProgram;
     private megaStateFlags: Partial<GfxMegaStateDescriptor>;
+    private materialParams = new MaterialParams();
+    private hdrData = new HDRTranslateData();
 
     constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, public fmat: FMAT) {
         this.program = new AglProgram(fmat);
@@ -490,8 +595,11 @@ class FMATInstance {
             blendSrcFactor: isTranslucent ? translateBlendSrcFactor(fmat) : GfxBlendFactor.One,
             blendDstFactor: isTranslucent ? translateBlendDstFactor(fmat) : GfxBlendFactor.Zero,
         });
+
+        this.parseMaterialParams(fmat);
     }
 
+    // TODO: include material uniforms
     public setOnRenderInst(device: GfxDevice, renderInst: GfxRenderInst): void {
         const isTranslucent = this.program.isTranslucent;
         const materialLayer = isTranslucent ? GfxRendererLayer.TRANSLUCENT : GfxRendererLayer.OPAQUE;
@@ -504,6 +612,44 @@ class FMATInstance {
     public destroy(device: GfxDevice): void {
         device.destroyProgram(this.gfxProgram);
     }
+
+    private parseMaterialParams(fmat: FMAT): void {
+        // TODO: real parsing
+        this.materialParams.force_roughness = 1.0;
+        this.materialParams.alpha_test_value = 0.5;
+    }
+
+    public fillMaterialParams(d: Float32Array, offs: number): number {
+        offs += fillVec4(d, offs, this.materialParams.const_color0);
+        offs += fillVec4(d, offs, this.materialParams.const_color1);
+        offs += fillVec4(d, offs, this.materialParams.const_color2);
+        offs += fillVec4(d, offs, this.materialParams.const_color3);
+        
+        d[offs++] = this.materialParams.const_single0;
+        d[offs++] = this.materialParams.const_single1;
+        d[offs++] = this.materialParams.const_single2;
+        d[offs++] = this.materialParams.const_single3;
+        
+        // mul colors
+        offs += fillVec4(d, offs, this.materialParams.base_color_mul_color);
+        offs += fillVec4(d, offs, this.materialParams.uniform0_mul_color);
+        offs += fillVec4(d, offs, this.materialParams.uniform1_mul_color);
+        offs += fillVec4(d, offs, this.materialParams.uniform2_mul_color);
+        offs += fillVec4(d, offs, this.materialParams.uniform3_mul_color);
+        offs += fillVec4(d, offs, this.materialParams.uniform4_mul_color);
+        
+        // TODO: add remaining parameters
+        
+        return offs;
+    }
+}
+
+function fillVec4(d: Float32Array, offs: number, v: vec4): number {
+    d[offs++] = v[0];
+    d[offs++] = v[1];
+    d[offs++] = v[2];
+    d[offs++] = v[3];
+    return 4;
 }
 
 function translateAttributeFormat(attributeFormat: AttributeFormat): GfxFormat {
@@ -752,16 +898,107 @@ class FSHPInstance {
         return viewMatrix;
     }
 
+    private fillMdlEnvView(d: Float32Array, offs: number, viewerInput: Viewer.ViewerRenderInput, modelMatrix: mat4): number {
+        const viewMatrix = scratchMatrix;
+        computeViewMatrix(viewMatrix, viewerInput.camera);
+        offs += fillMatrix4x3(d, offs, viewMatrix);
+        offs += 12; // padding
+        
+        const viewInv = mat4.create();
+        mat4.invert(viewInv, viewMatrix);
+        offs += fillMatrix4x3(d, offs, viewInv);
+        offs += 12; // padding
+        
+        const viewProj = mat4.create();
+        mat4.mul(viewProj, viewerInput.camera.projectionMatrix, viewMatrix);
+        offs += fillMatrix4x4(d, offs, viewProj);
+        
+        const viewProjInv = mat4.create();
+        mat4.invert(viewProjInv, viewProj);
+        offs += fillMatrix4x3(d, offs, viewProjInv);
+        offs += 12; // padding
+        
+        const projInv = mat4.create();
+        mat4.invert(projInv, viewerInput.camera.projectionMatrix);
+        offs += fillMatrix4x4(d, offs, projInv);
+        
+        // TODO: skipping ProjInvNoPos for now
+        offs += 12;
+        
+        d[offs++] = 1.0;  // Exposure.x
+        d[offs++] = 1.0;  // Exposure.y
+        d[offs++] = 0.0;  // Exposure.z
+        d[offs++] = 0.0;  // Exposure.w
+        
+        // Dir (light direction vec4)
+        d[offs++] = -0.5;
+        d[offs++] = -0.5;
+        d[offs++] = -1.0;
+        d[offs++] = 0.0;
+        
+        // ZNearFar (vec4)
+        d[offs++] = 0.1;      // Near
+        d[offs++] = 100000.0; // Far
+        d[offs++] = 100000.0 - 0.1;  // Far - Near
+        d[offs++] = 1.0 / (100000.0 - 0.1); // 1 / (Far - Near)
+        
+        // TanFov (vec2)
+        d[offs++] = 1.0;
+        d[offs++] = 1.0;
+        
+        // ProjOffset (vec2)
+        d[offs++] = 0.0;
+        d[offs++] = 0.0;
+        
+        // ScreenSize (vec4)
+        d[offs++] = viewerInput.backbufferWidth;
+        d[offs++] = viewerInput.backbufferHeight;
+        d[offs++] = 1.0 / viewerInput.backbufferWidth;
+        d[offs++] = 1.0 / viewerInput.backbufferHeight;
+        
+        // CameraPos (vec4)
+        d[offs++] = viewerInput.camera.worldMatrix[12];
+        d[offs++] = viewerInput.camera.worldMatrix[13];
+        d[offs++] = viewerInput.camera.worldMatrix[14];
+        d[offs++] = 1.0;
+
+        d[offs++] = 2.2;  // Power
+        d[offs++] = 1.0;  // Range
+        
+        return offs;
+    }
+
     public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, modelMatrix: mat4, viewerInput: Viewer.ViewerRenderInput): void {
         if (!this.visible)
             return;
 
+        console.log('FSHPInstance.prepareToRender called');
+
         // TODO(jstpierre): Joints.
         const template = renderInstManager.pushTemplate();
+
+        // ub_ShapeParams
         let offs = template.allocateUniformBuffer(AglProgram.ub_ShapeParams, 16+12);
         const d = template.mapUniformBufferF32(AglProgram.ub_ShapeParams);
         offs += fillMatrix4x4(d, offs, viewerInput.camera.projectionMatrix);
         offs += fillMatrix4x3(d, offs, this.computeModelView(modelMatrix, viewerInput));
+        
+        // ub_MdlEnvView has camera and environment data
+        // also has ub_HDRTranslate data at the end
+        offs = template.allocateUniformBuffer(AglProgram.ub_MdlEnvView, 132);
+        const envData = template.mapUniformBufferF32(AglProgram.ub_MdlEnvView);
+        offs = this.fillMdlEnvView(envData, 0, viewerInput, modelMatrix);
+        
+        // ub_Material
+        // 200 might be overkill
+        offs = template.allocateUniformBuffer(AglProgram.ub_Material, 200);
+        const matData = template.mapUniformBufferF32(AglProgram.ub_Material);
+        offs = this.fmatInstance.fillMaterialParams(matData, 0);
+
+        // ub_ModelAdditionalInfo
+        offs = template.allocateUniformBuffer(AglProgram.ub_ModelAdditionalInfo, 16 + 16 + 8 + 64 + 64 + 64 + 64 + 16 + 16);
+        const modelAddData = template.mapUniformBufferF32(AglProgram.ub_ModelAdditionalInfo);
+        
         this.fmatInstance.setOnRenderInst(device, template);
 
         for (let i = 0; i < this.lodMeshInstances.length; i++) {
@@ -777,7 +1014,7 @@ class FSHPInstance {
 }
 
 const bindingLayouts: GfxBindingLayoutDescriptor[] = [
-    { numUniformBuffers: 1, numSamplers: 8 }, // Scene
+    { numUniformBuffers: 4, numSamplers: 8 }, // Scene
 ];
 
 export class FMDLRenderer {
