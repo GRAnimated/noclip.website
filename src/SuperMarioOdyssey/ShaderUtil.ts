@@ -5,9 +5,18 @@ export function generateShaderUtil(): string {
     ${GfxShaderLibrary.saturate}
 
     const float PI = 3.1415926535897932384626433832795;
+    const float INV_PI = 0.31830988618;
     const float EULERS_NUMBER = 2.71828182845904;
 
     float fma(float a, float b, float c) {
+        return (a * b) + c;
+    }
+
+    vec3 fma(vec3 a, vec3 b, vec3 c) {
+        return (a * b) + c;
+    }
+
+    vec4 fma(vec4 a, vec4 b, vec4 c) {
         return (a * b) + c;
     }
 

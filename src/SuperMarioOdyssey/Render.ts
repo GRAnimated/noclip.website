@@ -122,14 +122,6 @@ function translateTexFilterMode(filterMode: FilterMode): GfxTexFilterMode {
     }
 }
 
-class MdlEnvViewData {
-    public exposure = 1.0;
-    public dirLightDir = vec3.fromValues(-0.5, -0.5, -1.0);
-    public zNear = 0.1;
-    public zFar = 100000.0;
-    public cameraPos = vec3.create();
-}
-
 class MaterialParams {
     public const_color0 = vec4.create();
     public const_color1 = vec4.create();
@@ -252,18 +244,22 @@ layout(std140) uniform ub_ShapeParams {
 };
 
 layout(std140) uniform ub_MdlEnvView {
+    float HDRTranslate_uHDRPower;     // moved here due to reduce the amount of uniform buffers
+    float HDRTranslate_uDynamicRange;
+    vec2 _padding0;
+    vec4 cDirLightViewDirFetchPos; // Directional light
+    
     Mat3x4 cView;
     Mat3x4 cViewInv;
     Mat4x4 cViewProj;
     Mat3x4 cInvProjView;
+    vec4 _padding1;
     Mat4x4 cInvProj;
     Mat3x4 uInvProjViewNoTrans;
 
     float cInvExposure;
     float uIrradianceScale;
-
-    // Directional light
-    vec4 cDirLightViewDirFetchPos;
+    vec2 _padding2;
     
     float cNear;
     float cFar;
@@ -273,9 +269,7 @@ layout(std140) uniform ub_MdlEnvView {
     vec2 cScrProjOffset;
     vec4 cScrSize;
     vec3 cCameraPos;
-
-    float HDRTranslate_uHDRPower;     // moved here due to reduce the amount of uniform buffers
-    float HDRTranslate_uDynamicRange;
+    float _padding3;
 } mdlEnvView;
 
 layout(std140) uniform ub_Material {
@@ -373,12 +367,12 @@ uniform sampler2D u_Texture7;
     }
 
     public getShaderOptionNumber(optionName: string): number {
-        const optionValue = assertExists(this.fmat.shaderAssign.shaderOption.get(optionName));
+        const optionValue = assertExists(this.fmat.shaderAssign.shaderOption.get(optionName), `Shader option ${optionName} not found in material ${this.fmat.name}`);
         return +optionValue;
     }
 
     public getShaderOptionBoolean(optionName: string): boolean {
-        const optionValue = assertExists(this.fmat.shaderAssign.shaderOption.get(optionName));
+        const optionValue = assertExists(this.fmat.shaderAssign.shaderOption.get(optionName), `Shader option ${optionName} not found in material ${this.fmat.name}`);
         assert(optionValue === '0' || optionValue === '1');
         return optionValue === '1';
     }
@@ -387,21 +381,34 @@ uniform sampler2D u_Texture7;
         return this.getShaderOptionBoolean(optionName) ? branchTrue() : branchFalse();
     }
 
-    public generateComponentMask(componentMask: number): string {
-        switch (componentMask) {
-            case 10: return '.rgba';
-            case 20: return '.rrrr';
-            case 30: return '.gggg';
-            case 40: return '.bbbb';
-            case 50: return '.aaaa';
-            case 60: return '.aaaa';
-            case 11: return '(1.0 - .rgba)';
-            case 21: return '(1.0 - .rrrr)';
-            case 31: return '(1.0 - .gggg)';
-            case 70: return 'clamp(1.0 - .rrrr, 0.0, 1.0)';
-            case 80: return 'clamp(1.0 - .gggg, 0.0, 1.0)';
-            default: return '.rgba';
-        }
+    // Blend has different components for some reason
+    /*
+    public generateBlendComponentMask(mask: number): string {
+        if      (mask == 10)  return '.rgba';
+        else if (mask == 20)  return '.rrrr';
+        else if (mask == 30)  return '.gggg';
+        else if (mask == 40)  return '.bbbb';
+        else if (mask == 50)  return '.aaaa';
+        else if (mask == 11)  return '1.0 - .rgba';
+        else if (mask == 21)  return '1.0 - .rrrr';
+        else if (mask == 31)  return '1.0 - .gggg';
+        else if (mask == 41)  return '1.0 - .bbbb';
+        else if (mask == 51)  return '1.0 - .aaaa';
+        return '.rgba';
+    }
+    */
+
+    public generateComponentMask(mask: number): string {
+        if      (mask == 10)  return '.rgba';
+        else if (mask == 30)  return '.rrrr';
+        else if (mask == 40)  return '.gggg';
+        else if (mask == 50)  return '.bbbb';
+        else if (mask == 60)  return '.aaaa';
+        else if (mask == 70)  return 'clamp(1.0 - .rrrr, 0.0, 1.0)';
+        else if (mask == 80)  return 'clamp(1.0 - .gggg, 0.0, 1.0)';
+        else if (mask == 90)  return 'clamp(1.0 - .bbbb, 0.0, 1.0)';
+        else if (mask == 100) return 'clamp(1.0 - .aaaa, 0.0, 1.0)';
+        return '.rgba';
     }
 
     public genSample(shadingModelSamplerBindingName: string, uvIdx: number = 0): string {
@@ -423,14 +430,14 @@ uniform sampler2D u_Texture7;
         const srcId = `blend${instance}_src`;
         const dstId = `blend${instance}_dst`;
         const cofId = `blend${instance}_cof`;
+        const cofMapId = `blend${instance}_cof_map`;
         const equation = this.getShaderOptionNumber(`blend${instance}_eq`);
 
         const src = `${this.genOutput(srcId)}${this.genOutputCompMask(`blend${instance}_src_ch`)}`;
         const dst = `${this.genOutput(dstId)}${this.genOutputCompMask(`blend${instance}_dst_ch`)}`;
-        const cof = `${this.genOutput(cofId)}${this.genOutputCompMask(`blend${instance}_cof_ch`)}`;
+        const cof = `CalculateCofBlendOutput(${this.getShaderOptionNumber(cofId)}, ${this.getShaderOptionNumber(cofMapId)})${this.genOutputCompMask(`blend${instance}_cof_ch`)}`;
 
         switch (equation) {
-            // fma(a, b, c) becomes ((a) * (b) + (c))
             case 0: return `((${src} - ${dst}) * ${cof} + ${dst})`;
             case 1: return `(${dst} * ${cof} + ${src})`;
             case 2: return `(${dst} * ${cof} * ${src})`;
@@ -727,7 +734,7 @@ class FMATInstance {
                     break;
 
                 default:
-                    console.warn(`Unknown material parameter: ${p.name}`);
+                    // console.warn(`Unknown material parameter: ${p.name}`);
                     break;
             }
         }
@@ -1105,15 +1112,25 @@ class FSHPInstance {
     }
 
     private fillMdlEnvView(d: Float32Array, offs: number, viewerInput: Viewer.ViewerRenderInput, modelMatrix: mat4): number {
+        d[offs++] = 0.5;  // HDRTranslate_uHDRPower
+        d[offs++] = 2.2;  // HDRTranslate_uDynamicRange
+        offs += 2;          // padding
+        
+        const lightDir = vec3.fromValues(0.3, 0.7, -0.2);
+        vec3.normalize(lightDir, lightDir);
+        // cDirLightViewDirFetchPos
+        d[offs++] = lightDir[0];
+        d[offs++] = lightDir[1];
+        d[offs++] = lightDir[2];
+        d[offs++] = 0.5;
+
         const viewMatrix = scratchMatrix;
         computeViewMatrix(viewMatrix, viewerInput.camera);
         offs += fillMatrix4x3(d, offs, viewMatrix);
-        offs += 12; // padding
         
         const viewInv = mat4.create();
         mat4.invert(viewInv, viewMatrix);
         offs += fillMatrix4x3(d, offs, viewInv);
-        offs += 12; // padding
         
         const viewProj = mat4.create();
         mat4.mul(viewProj, viewerInput.camera.projectionMatrix, viewMatrix);
@@ -1122,54 +1139,47 @@ class FSHPInstance {
         const viewProjInv = mat4.create();
         mat4.invert(viewProjInv, viewProj);
         offs += fillMatrix4x3(d, offs, viewProjInv);
-        offs += 12; // padding
+        offs += 4;
         
         const projInv = mat4.create();
         mat4.invert(projInv, viewerInput.camera.projectionMatrix);
         offs += fillMatrix4x4(d, offs, projInv);
         
-        // TODO: skipping ProjInvNoPos for now
-        offs += 12;
+        // uInvProjViewNoTrans
+        const invProjViewNoTrans = mat4.clone(viewProjInv);
+        invProjViewNoTrans[12] = 0.0;  // remove translation
+        invProjViewNoTrans[13] = 0.0;
+        invProjViewNoTrans[14] = 0.0;
+        offs += fillMatrix4x3(d, offs, invProjViewNoTrans);
         
-        d[offs++] = 1.0;  // Exposure.x
-        d[offs++] = 1.0;  // Exposure.y
-        d[offs++] = 0.0;  // Exposure.z
-        d[offs++] = 0.0;  // Exposure.w
+        // cInvExposure and uIrradianceScale
+        d[offs++] = 1.0;  // cInvExposure
+        d[offs++] = 1.0;  // uIrradianceScale
+        offs += 2;
         
-        // Dir (light direction vec4)
-        d[offs++] = -0.5;
-        d[offs++] = -0.5;
-        d[offs++] = -1.0;
-        d[offs++] = 0.0;
+        d[offs++] = 0.1;      // cNear
+        d[offs++] = 100000.0; // cFar
+        d[offs++] = 100000.0 - 0.1;  // cRange
+        d[offs++] = 1.0 / (100000.0 - 0.1); // cInvRange
         
-        // ZNearFar (vec4)
-        d[offs++] = 0.1;      // Near
-        d[offs++] = 100000.0; // Far
-        d[offs++] = 100000.0 - 0.1;  // Far - Near
-        d[offs++] = 1.0 / (100000.0 - 0.1); // 1 / (Far - Near)
+        // cTanFovyHalf (vec2)
+        d[offs++] = 1.0;  // cTanFovyHalf.x
+        d[offs++] = 1.0;  // cTanFovyHalf.y
+        // cScrProjOffset (vec2)
+        d[offs++] = 0.0;  // cScrProjOffset.x
+        d[offs++] = 0.0;  // cScrProjOffset.y
         
-        // TanFov (vec2)
-        d[offs++] = 1.0;
-        d[offs++] = 1.0;
-        
-        // ProjOffset (vec2)
-        d[offs++] = 0.0;
-        d[offs++] = 0.0;
-        
-        // ScreenSize (vec4)
+        // cScrSize (vec4)
         d[offs++] = viewerInput.backbufferWidth;
         d[offs++] = viewerInput.backbufferHeight;
         d[offs++] = 1.0 / viewerInput.backbufferWidth;
         d[offs++] = 1.0 / viewerInput.backbufferHeight;
         
-        // CameraPos (vec4)
+        // cCameraPos (vec3 + 1 padding)
         d[offs++] = viewerInput.camera.worldMatrix[12];
         d[offs++] = viewerInput.camera.worldMatrix[13];
         d[offs++] = viewerInput.camera.worldMatrix[14];
-        d[offs++] = 1.0;
-
-        d[offs++] = 2.2;  // Power
-        d[offs++] = 1.0;  // Range
+        offs += 1; // padding
         
         return offs;
     }
@@ -1177,8 +1187,6 @@ class FSHPInstance {
     public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, modelMatrix: mat4, viewerInput: Viewer.ViewerRenderInput): void {
         if (!this.visible)
             return;
-
-        console.log('FSHPInstance.prepareToRender called');
 
         // TODO(jstpierre): Joints.
         const template = renderInstManager.pushTemplate();
@@ -1189,20 +1197,18 @@ class FSHPInstance {
         offs += fillMatrix4x4(d, offs, viewerInput.camera.projectionMatrix);
         offs += fillMatrix4x3(d, offs, this.computeModelView(modelMatrix, viewerInput));
         
-        // ub_MdlEnvView has camera and environment data
-        // also has ub_HDRTranslate data at the end
-        offs = template.allocateUniformBuffer(AglProgram.ub_MdlEnvView, 132);
+        // ub_MdlEnvView has camera, environment, and added ub_HDRTranslate data
+        template.allocateUniformBuffer(AglProgram.ub_MdlEnvView, 132);
         const envData = template.mapUniformBufferF32(AglProgram.ub_MdlEnvView);
-        offs = this.fillMdlEnvView(envData, 0, viewerInput, modelMatrix);
+        this.fillMdlEnvView(envData, 0, viewerInput, modelMatrix);
         
         // ub_Material
-        // 200 might be overkill
-        offs = template.allocateUniformBuffer(AglProgram.ub_Material, 200);
+        template.allocateUniformBuffer(AglProgram.ub_Material, 200); // TODO: calculate right size
         const matData = template.mapUniformBufferF32(AglProgram.ub_Material);
-        offs = this.fmatInstance.fillMaterialParams(matData, 0);
+        this.fmatInstance.fillMaterialParams(matData, 0);
 
         // ub_ModelAdditionalInfo
-        offs = template.allocateUniformBuffer(AglProgram.ub_ModelAdditionalInfo, 16 + 16 + 8 + 64 + 64 + 64 + 64 + 16 + 16);
+        template.allocateUniformBuffer(AglProgram.ub_ModelAdditionalInfo, 16 + 16 + 8 + 64 + 64 + 64 + 64 + 16 + 16);
         const modelAddData = template.mapUniformBufferF32(AglProgram.ub_ModelAdditionalInfo);
         
         this.fmatInstance.setOnRenderInst(device, template);
