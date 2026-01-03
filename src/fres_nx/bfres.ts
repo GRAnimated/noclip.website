@@ -3,7 +3,7 @@ import ArrayBufferSlice from "../ArrayBufferSlice.js";
 import { assert, readString, align } from "../util.js";
 import { AttributeFormat, IndexFormat, PrimitiveTopology, TextureAddressMode, FilterMode } from "./nngfx_enum.js";
 import { AABB } from "../Geometry.js";
-import { vec2, vec4 } from "gl-matrix";
+import { vec2, vec3, vec4 } from "gl-matrix";
 import { Color } from "../Color.js";
 
 export interface FSKL_Bone {
@@ -306,22 +306,32 @@ function parseFSHP(buffer: ArrayBufferSlice, memoryPoolBuffer: ArrayBufferSlice,
 }
 
 export function parseFMAT_ShaderParam_Float(p: FMAT_ShaderParam): number {
-    assert(p.type === FMAT_ShaderParamType.Float);
+    assert(p.type === FMAT_ShaderParamType.Float, `expected float for shader param '${p.name}', got ${FMAT_ShaderParamType[p.type]}`);
     assert(p.rawData.byteLength === 0x04);
     const view = p.rawData.createDataView();
     return view.getFloat32(0x00, p.littleEndian);
 }
 
 export function parseFMAT_ShaderParam_Float2(dst: vec2, p: FMAT_ShaderParam): void {
-    assert(p.type === FMAT_ShaderParamType.Float2);
+    assert(p.type === FMAT_ShaderParamType.Float2, `expected float for shader param '${p.name}', got ${FMAT_ShaderParamType[p.type]}`);
     assert(p.rawData.byteLength === 0x08);
     const view = p.rawData.createDataView();
     dst[0] = view.getFloat32(0x00, p.littleEndian);
     dst[1] = view.getFloat32(0x04, p.littleEndian);
 }
 
+// TODO: Should this function exist? Color3 is the same except for the dst type
+export function parseFMAT_ShaderParam_Float3(dst: vec3, p: FMAT_ShaderParam): void {
+    assert(p.type === FMAT_ShaderParamType.Float3, `expected Float3 for shader param '${p.name}', got ${FMAT_ShaderParamType[p.type]}`);
+    assert(p.rawData.byteLength === 0x0C);
+    const view = p.rawData.createDataView();
+    dst[0] = view.getFloat32(0x00, p.littleEndian);
+    dst[1] = view.getFloat32(0x04, p.littleEndian);
+    dst[2] = view.getFloat32(0x08, p.littleEndian);
+}
+
 export function parseFMAT_ShaderParam_Float4(dst: vec4, p: FMAT_ShaderParam): void {
-    assert(p.type === FMAT_ShaderParamType.Float4);
+    assert(p.type === FMAT_ShaderParamType.Float4, `expected Float4 for shader param '${p.name}', got ${FMAT_ShaderParamType[p.type]}`);
     assert(p.rawData.byteLength === 0x10);
     const view = p.rawData.createDataView();
     dst[0] = view.getFloat32(0x00, p.littleEndian);
@@ -331,7 +341,7 @@ export function parseFMAT_ShaderParam_Float4(dst: vec4, p: FMAT_ShaderParam): vo
 }
 
 export function parseFMAT_ShaderParam_Color3(dst: Color, p: FMAT_ShaderParam): void {
-    assert(p.type === FMAT_ShaderParamType.Float3);
+    assert(p.type === FMAT_ShaderParamType.Float3, `expected Float3 for shader param '${p.name}', got ${FMAT_ShaderParamType[p.type]}`);
     assert(p.rawData.byteLength === 0x0C);
     const view = p.rawData.createDataView();
     dst.r = view.getFloat32(0x00, p.littleEndian);
@@ -339,7 +349,7 @@ export function parseFMAT_ShaderParam_Color3(dst: Color, p: FMAT_ShaderParam): v
     dst.b = view.getFloat32(0x08, p.littleEndian);
 }
 
-interface Texsrt {
+export interface Texsrt {
     mode: number;
     scaleS: number;
     scaleT: number;

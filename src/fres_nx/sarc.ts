@@ -56,7 +56,7 @@ export function parse(buffer: ArrayBufferSlice) {
         let name;
         if (!!(flags >>> 24)) {
             const nameOffs = ((flags & 0x00FFFFFF) * 4);
-            name = readString(buffer, sfntStringTableOffs + nameOffs, 0xFF);
+            name = readString(buffer, sfntStringTableOffs + nameOffs, 0xFF, true, 'utf8');
         } else {
             name = nameHash.toString(16);
         }

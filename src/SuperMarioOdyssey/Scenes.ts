@@ -130,6 +130,19 @@ type UnitConfig = {
     ParameterConfigName: string,
     PlacementTargetFile: string,
 };
+type GraphicsAreaParamEntry = {
+    AreaName: string;
+    CubeMapUnitName: string;
+    LerpStep: number;
+    PresetName: string;
+    SuffixName: string;
+};
+type GraphicsArea = {
+    GraphicsAreaParamArray: GraphicsAreaParamEntry[];
+};
+type GraphicsPreset = {
+    Sky: { Name: string };
+}
 
 function calcModelMtxFromTRSVectors(dst: mat4, tv: Vector, rv: Vector, sv: Vector): void {
     computeModelMatrixSRT(dst,
@@ -180,10 +193,34 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
             const stageMapData = assertExists(await resourceSystem.fetchData(device, dataFetcher, `StageData/${stageName}Map`));
             const stageMap: StageMap = BYML.parse(assertExists(stageMapData.files.find((n) => n.name === `${stageName}Map.byml`)).buffer);
 
+            const stageDesignData = assertExists(await resourceSystem.fetchData(device, dataFetcher, `StageData/${stageName}Design`));
+            const stageDesign: GraphicsArea = BYML.parse(assertExists(stageDesignData.files.find((n) => n.name === `GraphicsArea.byml`)).buffer);
+
             const scenarioNum = world.AfterEndingScenario;
             // It seems like the scenarios are 1-indexed, and 0 means "default" (which appears to be 1).
             const scenarioIndex = scenarioNum > 0 ? scenarioNum - 1 : 0;
             const entry = stageMap[scenarioIndex];
+
+            let stageDesignParam = stageDesign.GraphicsAreaParamArray.find((e) => e.AreaName === "DefaultArea" && e.SuffixName === `Scenario${scenarioIndex + 1}`);
+            if (!stageDesignParam)
+                stageDesignParam = stageDesign.GraphicsAreaParamArray.find((e) => e.AreaName === "DefaultArea" && e.SuffixName === "");
+            
+            console.log('Stage Design:', stageDesignParam);
+
+            const presetName: string = stageDesignParam ? String(stageDesignParam.PresetName) : "";
+
+            const graphicsPresetSARC = await resourceSystem.fetchData(device, dataFetcher, `SystemData/GraphicsPreset`);
+            console.log('Graphics Preset:', graphicsPresetSARC);
+            let graphicsPreset: GraphicsPreset | null = null;
+            for (let i = 0; i < graphicsPresetSARC!.files.length; i++) {
+                const file = graphicsPresetSARC!.files[i];
+                const filePresetName: string = file.name.replace('.byml', '');
+                if (filePresetName === `${presetName}`) {
+                    console.log('Found Graphics Preset:', filePresetName);
+                    graphicsPreset = BYML.parse(file.buffer);
+                    break;
+                }
+            }
 
             if (entry.ObjectList !== undefined)
                 for (let i = 0; i < entry.ObjectList.length; i++)
@@ -191,6 +228,9 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
             if (entry.ZoneList !== undefined)
                 for (let i = 0; i < entry.ZoneList.length; i++)
                     resourceSystem.fetchData(device, dataFetcher, `StageData/${entry.ZoneList[i].UnitConfigName}Map`);
+            if (graphicsPreset) {
+                // resourceSystem.fetchData(device, dataFetcher, `ObjectData/${graphicsPreset.Sky.Name}`);
+            }
 
             await resourceSystem.waitForLoad();
 
@@ -205,6 +245,17 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
                     calcModelMtxFromTRSVectors(fmdlRenderer.modelMatrix, stageObject.Translate, stageObject.Rotate, stageObject.Scale);
                     mat4.mul(fmdlRenderer.modelMatrix, placement, fmdlRenderer.modelMatrix);
                     sceneRenderer.fmdlRenderers.push(fmdlRenderer);
+                }
+                if (graphicsPreset) {
+                    // TODO: The sky's texture errors, lets fix it another time
+                    /*
+                    const skyFmdlData = resourceSystem.getFMDLData(device, `ObjectData/${graphicsPreset.Sky.Name}`);
+                    if (skyFmdlData !== null) {
+                        const skyRenderer = new FMDLRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData);
+                        mat4.copy(skyRenderer.modelMatrix, placement);
+                        sceneRenderer.fmdlRenderers.push(skyRenderer);
+                    }
+                    */
                 }
             }
 

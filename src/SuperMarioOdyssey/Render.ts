@@ -8,7 +8,7 @@ import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode,
 import * as BNTX from '../fres_nx/bntx.js';
 import { surfaceToCanvas } from '../Common/bc_texture.js';
 import { translateImageFormat, deswizzle, decompress, getImageFormatString } from '../fres_nx/tegra_texture.js';
-import { FMDL, FSHP, FMAT, FMAT_RenderInfo, FMAT_RenderInfoType, FVTX, FSHP_Mesh, FRES, FVTX_VertexAttribute, FVTX_VertexBuffer } from '../fres_nx/bfres.js';
+import { FMDL, FSHP, FMAT, FMAT_RenderInfo, FMAT_RenderInfoType, FVTX, FSHP_Mesh, FRES, FVTX_VertexAttribute, FVTX_VertexBuffer, Texsrt, parseFMAT_ShaderParam_Float, parseFMAT_ShaderParam_Float2, parseFMAT_ShaderParam_Float3, parseFMAT_ShaderParam_Float4, parseFMAT_ShaderParam_Color3, parseFMAT_ShaderParam_Texsrt } from '../fres_nx/bfres.js';
 import { GfxRenderInst, makeSortKey, GfxRendererLayer, setSortKeyDepth, GfxRenderInstManager, GfxRenderInstList } from '../gfx/render/GfxRenderInstManager.js';
 import { TextureAddressMode, FilterMode, IndexFormat, AttributeFormat, getChannelFormat, getTypeFormat } from '../fres_nx/nngfx_enum.js';
 import { nArray, assert, assertExists } from '../util.js';
@@ -135,29 +135,58 @@ class MaterialParams {
     public const_color1 = vec4.create();
     public const_color2 = vec4.create();
     public const_color3 = vec4.create();
-    
     public const_single0 = 0.0;
     public const_single1 = 0.0;
     public const_single2 = 0.0;
     public const_single3 = 0.0;
-    
     public base_color_mul_color = vec4.fromValues(1, 1, 1, 1);
     public uniform0_mul_color = vec4.fromValues(1, 1, 1, 1);
     public uniform1_mul_color = vec4.fromValues(1, 1, 1, 1);
     public uniform2_mul_color = vec4.fromValues(1, 1, 1, 1);
     public uniform3_mul_color = vec4.fromValues(1, 1, 1, 1);
     public uniform4_mul_color = vec4.fromValues(1, 1, 1, 1);
-    
-    // Texture matrices
-    public tex_mtx0: vec4[] = [vec4.create(), vec4.create()];
-    public tex_mtx1: vec4[] = [vec4.create(), vec4.create()];
-    public tex_mtx2: vec4[] = [vec4.create(), vec4.create()];
-    public tex_mtx3: vec4[] = [vec4.create(), vec4.create()];
-    
+    public proc_texture_2d_mul_color = vec4.fromValues(1, 1, 1, 1);
+    public proc_texture_3d_mul_color = vec4.fromValues(1, 1, 1, 1);
+    public displacement1_color = vec4.fromValues(1, 1, 1, 1);
+    public ripple_emission_color = vec4.fromValues(1, 1, 1, 1);
+    public hack_color = vec4.fromValues(1, 1, 1, 1);
+    public stain_color = vec4.fromValues(1, 1, 1, 1);
+    public displacement_color = vec4.fromValues(1, 1, 1, 1);
+    public Flow0_param = vec4.fromValues(1, 1, 1, 1);
+    public tex_mtx0: Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+    public tex_mtx1: Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+    public tex_mtx2: Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+    public tex_mtx3: Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+    public sphere_rate_color0 = 1.0;
+    public sphere_rate_color1 = 1.0;
+    public sphere_rate_color2 = 1.0;
+    public sphere_rate_color3 = 1.0;
+    public decal_range = 0.0;
+    public gbuf_fetch_offset = 0.0;
     public displacement_scale = 0.0;
     public displacement1_scale = 0.0;
-    public alpha_test_value = 0.5;
+    public stain_uv_scale = 0.0;
+    public indirect_depth_scale = 0.0;
+    public indirect1_scale: vec2 = vec2.create();
+    public proc_texture_3d_scale = vec3.fromValues(1, 1, 1);
+    public translucence_sharpness = 0.0;
+    public translucence_sharpness_strength = 0.0;
+    public translucence_factor = 0.0;
+    public translucence_silhouette_stress = 0.0;
+    public cloth_nov_peak_pos0 = 0.0;
+    public cloth_nov_peak_pow0 = 0.0;
+    public cloth_nov_tone_intensity0 = 0.0;
+    public cloth_nov_tone_pow0 = 0.0;
+    public cloth_nov_slope0 = 0.0;
+    public cloth_nov_emission_scale0 = 0.0;
+    public cloth_nov_noise_mask_scale0 = 0.0;
     public force_roughness = 1.0;
+    public material_lod_roughness = 1.0;
+    public material_lod_metalness = 0.0;
+    public alpha_test_value = 0.5;
+    public wrap_coef = 0.0;
+    public refract_thickness = 0.0;
+    public stain_rate = 1.0;
 }
 
 class HDRTranslateData {
@@ -379,7 +408,7 @@ uniform sampler2D u_Texture7;
         try {
             const samplerIndex = this.lookupSamplerIndex(shadingModelSamplerBindingName);
             const uv = `v_TexCoord${uvIdx}`;
-            return `texture(u_Texture${samplerIndex}, vec2(${uv}.x, 1.0 - ${uv}.y))`;
+            return `texture(u_Texture${samplerIndex}, vec2(${uv}.x, ${uv}.y))`;
         } catch(e) {
             // TODO(jstpierre): Figure out wtf is going on.
             console.warn(`${this.name}: No sampler by name ${shadingModelSamplerBindingName}`);
@@ -614,9 +643,94 @@ class FMATInstance {
     }
 
     private parseMaterialParams(fmat: FMAT): void {
-        // TODO: real parsing
-        this.materialParams.force_roughness = 1.0;
-        this.materialParams.alpha_test_value = 0.5;
+        const params = fmat.shaderParam;
+
+        for (const p of params) {
+            switch (p.name) {
+                case 'const_single0':
+                case 'const_single1':
+                case 'const_single2':
+                case 'const_single3':
+                case 'sphere_rate_color0':
+                case 'sphere_rate_color1':
+                case 'sphere_rate_color2':
+                case 'sphere_rate_color3':
+                case 'decal_range':
+                case 'gbuf_fetch_offset':
+                case 'translucence_sharpness':
+                case 'translucence_sharpness_strength':
+                case 'translucence_factor':
+                case 'translucence_silhouette_stress':
+                case 'indirect_depth_scale':
+                case 'cloth_nov_peak_pos0':
+                case 'cloth_nov_peak_pow0':
+                case 'cloth_nov_tone_intensity0':
+                case 'cloth_nov_tone_pow0':
+                case 'cloth_nov_slope0':
+                case 'cloth_nov_emission_scale0':
+                case 'cloth_nov_noise_mask_scale0':
+                case 'displacement_scale':
+                case 'displacement1_scale':
+                case 'force_roughness':
+                case 'stain_uv_scale':
+                case 'wrap_coef':
+                case 'refract_thickness':
+                case 'stain_rate':
+                case 'material_lod_roughness':
+                case 'alpha_test_value':
+                case 'material_lod_metalness':
+                    this.materialParams[p.name] = parseFMAT_ShaderParam_Float(p);
+                    break;
+
+                case 'indirect1_scale':
+                    if (!this.materialParams[p.name]) this.materialParams[p.name] = vec2.create();
+                    parseFMAT_ShaderParam_Float2(this.materialParams[p.name], p);
+                    break;
+
+                case 'proc_texture_3d_scale':
+                    if (!this.materialParams[p.name]) this.materialParams[p.name] = vec3.create();
+                    parseFMAT_ShaderParam_Float3(this.materialParams[p.name], p);
+                    break;
+
+                case 'const_color0':
+                case 'const_color1':
+                case 'const_color2':
+                case 'const_color3':
+                case 'base_color_mul_color':
+                case 'uniform0_mul_color':
+                case 'uniform1_mul_color':
+                case 'uniform2_mul_color':
+                case 'uniform3_mul_color':
+                case 'uniform4_mul_color':
+                case 'proc_texture_2d_mul_color':
+                case 'proc_texture_3d_mul_color':
+                case 'displacement1_color':
+                case 'ripple_emission_color':
+                case 'hack_color':
+                case 'stain_color':
+                case 'displacement_color':
+                case 'Flow0_param':
+                    if (!this.materialParams[p.name]) this.materialParams[p.name] = vec4.create();
+                    parseFMAT_ShaderParam_Float4(this.materialParams[p.name], p);
+                    break;
+
+                case 'tex_mtx0':
+                case 'tex_mtx1':
+                case 'tex_mtx2':
+                case 'tex_mtx3':
+                    if (!this.materialParams[p.name]) this.materialParams[p.name] = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+                    parseFMAT_ShaderParam_Texsrt(this.materialParams[p.name], p);
+                    break;
+
+                case 'mirror_view_proj':
+                    // TODO: mirror_view_proj
+                    break;
+
+                default:
+                    console.warn(`Unknown material parameter: ${p.name}`);
+                    break;
+            }
+        }
     }
 
     public fillMaterialParams(d: Float32Array, offs: number): number {
@@ -637,8 +751,83 @@ class FMATInstance {
         offs += fillVec4(d, offs, this.materialParams.uniform2_mul_color);
         offs += fillVec4(d, offs, this.materialParams.uniform3_mul_color);
         offs += fillVec4(d, offs, this.materialParams.uniform4_mul_color);
+        offs += fillVec4(d, offs, this.materialParams.proc_texture_2d_mul_color);
+        offs += fillVec4(d, offs, this.materialParams.proc_texture_3d_mul_color);
         
-        // TODO: add remaining parameters
+        // texture matrices (mat2x4 = 2 vec4s)
+        offs += fillTexsrtAsMatrix2x4(d, offs, this.materialParams.tex_mtx0);
+        offs += fillTexsrtAsMatrix2x4(d, offs, this.materialParams.tex_mtx1);
+        offs += fillTexsrtAsMatrix2x4(d, offs, this.materialParams.tex_mtx2);
+        offs += fillTexsrtAsMatrix2x4(d, offs, this.materialParams.tex_mtx3);
+        
+        d[offs++] = this.materialParams.displacement_scale;
+        d[offs++] = this.materialParams.displacement1_scale;
+        offs += 2; // padding
+        
+        offs += fillVec4(d, offs, this.materialParams.displacement_color);
+        offs += fillVec4(d, offs, this.materialParams.displacement1_color);
+        
+        d[offs++] = this.materialParams.wrap_coef;
+        d[offs++] = this.materialParams.refract_thickness;
+
+        // indirect0_scale
+        d[offs++] = 0.0;
+        d[offs++] = 0.0;
+        
+        // indirect1_scale (vec2)
+        d[offs++] = this.materialParams.indirect1_scale[0];
+        d[offs++] = this.materialParams.indirect1_scale[1];
+        
+        d[offs++] = this.materialParams.alpha_test_value;
+        d[offs++] = this.materialParams.force_roughness;
+        
+        d[offs++] = this.materialParams.sphere_rate_color0;
+        d[offs++] = this.materialParams.sphere_rate_color1;
+        d[offs++] = this.materialParams.sphere_rate_color2;
+        d[offs++] = this.materialParams.sphere_rate_color3;
+        
+        // mirror_view_proj
+        for (let i = 0; i < 16; i++) {
+            d[offs++] = 0.0; // TODO: figure out mirror_view_proj
+        }
+        
+        d[offs++] = this.materialParams.decal_range;
+        d[offs++] = this.materialParams.gbuf_fetch_offset;
+        d[offs++] = this.materialParams.translucence_sharpness;
+        d[offs++] = this.materialParams.translucence_sharpness_strength;
+        
+        d[offs++] = this.materialParams.translucence_factor;
+        d[offs++] = this.materialParams.translucence_silhouette_stress;
+        d[offs++] = this.materialParams.indirect_depth_scale;
+        d[offs++] = this.materialParams.cloth_nov_peak_pos0;
+        d[offs++] = this.materialParams.cloth_nov_peak_pow0;
+        d[offs++] = this.materialParams.cloth_nov_tone_intensity0;
+        d[offs++] = this.materialParams.cloth_nov_tone_pow0;
+        d[offs++] = this.materialParams.cloth_nov_slope0;
+        
+        d[offs++] = this.materialParams.cloth_nov_emission_scale0;
+        
+        // cloth_nov_noise_mask_scale0 (vec3)
+        d[offs++] = this.materialParams.cloth_nov_noise_mask_scale0;
+        d[offs++] = 0.0;
+        d[offs++] = 0.0;
+        
+        // proc_texture_3d_scale (vec4, but vec3 in shader params)
+        d[offs++] = this.materialParams.proc_texture_3d_scale[0];
+        d[offs++] = this.materialParams.proc_texture_3d_scale[1];
+        d[offs++] = this.materialParams.proc_texture_3d_scale[2];
+        d[offs++] = 1.0;
+        
+        // flow0_param?
+        
+        offs += fillVec4(d, offs, this.materialParams.ripple_emission_color);
+        offs += fillVec4(d, offs, this.materialParams.hack_color);
+        offs += fillVec4(d, offs, this.materialParams.stain_color);
+        
+        d[offs++] = this.materialParams.stain_uv_scale;
+        d[offs++] = this.materialParams.stain_rate;
+        d[offs++] = this.materialParams.material_lod_roughness;
+        d[offs++] = this.materialParams.material_lod_metalness;
         
         return offs;
     }
@@ -650,6 +839,23 @@ function fillVec4(d: Float32Array, offs: number, v: vec4): number {
     d[offs++] = v[2];
     d[offs++] = v[3];
     return 4;
+}
+
+function fillTexsrtAsMatrix2x4(d: Float32Array, offs: number, texsrt: Texsrt): number {
+    const c = Math.cos(texsrt.rotation);
+    const s = Math.sin(texsrt.rotation);
+    
+    d[offs++] = texsrt.scaleS * c;
+    d[offs++] = texsrt.scaleT * -s;
+    d[offs++] = 0.0;
+    d[offs++] = texsrt.translationS;
+    
+    d[offs++] = texsrt.scaleS * s;
+    d[offs++] = texsrt.scaleT * c;
+    d[offs++] = 0.0;
+    d[offs++] = texsrt.translationT;
+    
+    return 8; // vec4 * 2
 }
 
 function translateAttributeFormat(attributeFormat: AttributeFormat): GfxFormat {

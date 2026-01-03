@@ -125,6 +125,49 @@ Light SetupLight(vec3 N, vec3 view_pos)
     return light;
 }
 
+vec4 CalculateDiffuseIrradianceLight(Light light)
+{
+    vec4 irradiance = vec4(0.0, 0.0, 0.0, 1.0);
+    //Z seems flipped
+    vec3 dir = vec3(light.N.x, light.N.y, -light.N.z);
+
+    // irradiance lighting
+    if (${program.getShaderOptionBoolean('is_apply_irradiance_pixel')} == true)
+    {
+        // TODO: Cubemap based irradiance
+        /*
+        if (${program.getShaderOptionBoolean('enable_material_light')} == true)
+        {
+            const float MAX_LOD = 5.0;
+            vec4 irradiance_cubemap = DecodeCubemap(cTextureMaterialLightCube, dir, MAX_LOD);
+            irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.Exposure.y;
+        }
+        else //use material roughness cubemap
+        {
+            const float MAX_LOD = 5.0;
+            vec4 irradiance_cubemap = DecodeCubemap(cTexCubeMapRoughness, dir, MAX_LOD);
+            irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.Exposure.y;
+        }
+        if (${program.getShaderOptionBoolean('enable_material_sphere_light')} == true)
+        {
+	        vec2 sphereCoords = light.N.xy * vec2(0.5) + vec2(0.5,0.5);
+            vec4 sphere_light = textureLod(cTextureMaterialLightSphere, sphereCoords, 1.0).xyzw;
+            irradiance.rgba += sphere_light.rgba * mdlEnvView.Exposure.y;
+        }
+        */
+    }
+    else //calculated per vertex
+    {
+        //By vertex color
+        // if (vtxcolor_type == VTX_COLOR_TYPE_IRRADIANCE) {
+        irradiance.rgba = v_VtxColor;
+        // } else { //Calculated in vertex shader
+        //     irradiance.rgba = fIrradianceVertex.rgba;
+        // }
+    }
+    return irradiance;
+}
+
 vec3 CalculateBrdf(vec3 view_normal, vec3 dir, float roughness, vec3 f0)
 {
     float r = (1.0 - roughness);
@@ -217,7 +260,104 @@ void main() {
         specularTerm += spec_intensity;
     }
 
-    gl_FragColor = vec4(specularTerm.rgb, alpha);
+    // TODO: Cubemap
+
+    // TODO: enable_structural_color
+
+    // TODO: enable_material_sphere_light
+
+    // Diffuse
+    vec3 diffuseTerm = saturate(base_color.rgb);
+
+    // Irradiance lighting
+    vec4 irradiance = CalculateDiffuseIrradianceLight(light);
+
+    // Adjust for metalness
+    diffuseTerm *= saturate(1.0 - metalness);
+    diffuseTerm *= vec3(1) - brdf;
+
+    diffuseTerm *= irradiance.rgb;
+
+    //base color refract type
+    if (${program.getShaderOptionBoolean('enable_transparent')} == true){
+        vec3 refract_amount = refract_rate * (vec3(1) - brdf);
+        vec3 refract_color = ${program.genOutput('o_refract_color')}.rgb;
+
+        /*
+
+        if (has_transparent_tex && transparent_tex_type == TRANS_TEX_TYPE_DIFFUSE 
+                                || transparent_tex_type == TRANS_TEX_TYPE_DIFFUSE_IRRADIANCE) 
+        {
+            vec3 transparent_tex = GetTransparentTexOutput(o_transparent_tex, refract_bias_x, refract_bias_y).rgb;
+            //refract
+            vec3 refract_value = transparent_tex * refract_color * refract_amount;
+            if (transparent_tex_type == TRANS_TEX_TYPE_DIFFUSE_IRRADIANCE) //apply irradiance
+                refract_value *= irradiance.rgb;
+
+            diffuseTerm.rgb += refract_value;
+        }
+        if (enable_transparent)
+        {
+            if  (transparent_type == TRANS_TYPE_IND_FBO || transparent_type == TRANS_TYPE_IND_FBO_DEPTH)
+            {
+                vec2 ind_coords = refract_eta * -N_I * view_normal.xy;
+
+                //coordinates with refract view as indirect
+                vec2 coords = GetScreenCoordinates() + ind_coords;
+                //Depth influences refraction
+                if (enable_indirect_dist_correct)
+                {
+                    //depth difference between our current depth and the previously sampled depth
+                    float d = -abs(fNormalsDepth.w - texture(cTextureLinearDepth, coords).x) * mat.indirect_depth_scale;
+                    d = saturate(1.0 - exp2(d));
+                   coords = GetScreenCoordinates() + ind_coords * d;
+                }
+                //depth type 
+                if (transparent_type == TRANS_TYPE_IND_FBO_DEPTH)
+                {
+                    //Only refract coords behind the current pixel, else keep coordinates normal
+                    if (texture(cTextureLinearDepth, coords).x < fNormalsDepth.w) 
+                        coords = GetScreenCoordinates();
+                }
+                vec4 fbo = texture(cFrameBufferTex, coords);
+                diffuseTerm.rgb += refract_amount * fbo.rgb * refract_color.rgb;
+            }
+        }
+        */
+
+        if (${program.getShaderOptionBoolean('enable_alphamask')} == true) {
+            int alpha_test_func = ${program.getShaderOptionNumber('alpha_test_func')};
+            if (alpha_test_func == 0) {
+                discard;
+            }
+            else if (alpha_test_func == 10) {
+                if (alpha >= mat.alpha_test_value)
+                    discard;
+            }
+            else if (alpha_test_func == 20) {
+                if (alpha != mat.alpha_test_value)
+                    discard;
+            }
+            else if (alpha_test_func == 30) {
+                if (alpha > mat.alpha_test_value)
+                    discard;
+            }
+            else if (alpha_test_func == 40) {
+                if (alpha <= mat.alpha_test_value)
+                    discard;
+            }
+            else if (alpha_test_func == 50) {
+                if (alpha == mat.alpha_test_value)
+                    discard;
+            }
+            else if (alpha_test_func == 60) {
+                if (alpha < mat.alpha_test_value)
+                    discard;
+            }
+        }
+    }
+
+    gl_FragColor = vec4(base_color.rgb, alpha);
 
     gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(1.0 / 2.2));
 }
