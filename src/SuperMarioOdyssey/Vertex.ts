@@ -1,4 +1,6 @@
-export function generateVertexShader(): string {
+import { AglProgram } from './Render.js';
+
+export function generateVertexShader(program: AglProgram): string {
     return `
 layout(location = 0) in vec3 _p0;
 layout(location = 1) in vec4 _c0;
@@ -27,6 +29,12 @@ out vec4 v_PerspDiv;
 void main() {
     vec3 t_PositionView = UnpackMatrix(u_ModelView) * vec4(_p0, 1.0);
     gl_Position = UnpackMatrix(u_Projection) * vec4(t_PositionView, 1.0);
+    
+    v_TexCoord0 = _u0;
+    v_TexCoord1 = _u1;
+    v_TexCoord2 = _u2;
+    v_TexCoord3 = _u3;
+    v_VtxColor = _c0;
 
     vec4 view_pos = multMtx34Vec4(mdlEnvView.cView, vec4(_p0, 1.0));
     v_ViewPos.zw = view_pos.xy;
@@ -40,11 +48,27 @@ void main() {
     v_LightColorVPosZ.xyz = light_color;
 
     const float MAX_LOD = 5.0;
-    // vec4 irradiance_cubemap = DecodeCubemap(cTexCubeMapRoughness, v_Normal, MAX_LOD);
-    // v_IrradianceVertex.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
-    
-    // TEMP: using vertex color as irradiance
-    // v_IrradianceVertex = _c0;
+   
+    if (${program.getShaderOptionBoolean('is_apply_irradiance_pixel')} == false)
+    {
+        if (${program.getShaderOptionBoolean('enable_material_light')}) // use material light cubemap
+        {
+            const float MAX_LOD = 5.0;
+            vec4 irradiance_cubemap = DecodeCubemap(u_CubemapTexture0, v_Normal, MAX_LOD);
+            v_IrradianceVertex = irradiance_cubemap *= mdlEnvView.uIrradianceScale;
+        }
+        else //use material roughness cubemap
+        {
+            // TODO: and TEMP: Roughness cubemap
+            const float MAX_LOD = 5.0;
+            vec4 irradiance_cubemap = DecodeCubemap(u_CubemapTexture0, v_Normal, MAX_LOD);
+            v_IrradianceVertex.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
+        }
+    }
+
+    // TODO: enable_motion_vec
+
+    // TODO: Check if any proj textures are used
 
     // Sphere mapping coordinates
     vec3 view_normal = normalize(multMtx34Vec3(mdlEnvView.cView, v_Normal));
@@ -52,11 +76,6 @@ void main() {
 
     v_PerspDiv.xy = gl_Position.xy / gl_Position.w;
 
-    v_TexCoord0 = _u0;
-    v_TexCoord1 = _u1;
-    v_TexCoord2 = _u2;
-    v_TexCoord3 = _u3;
-    v_VtxColor = _c0;
     v_Normal = _n0.xyz;
     v_Tangents = _t0;
     

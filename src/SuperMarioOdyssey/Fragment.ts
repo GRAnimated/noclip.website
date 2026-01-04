@@ -461,11 +461,13 @@ Light SetupLight(vec3 N, vec3 view_pos)
     Light light;
 
     vec3 dir = normalize(view_pos);
-    vec3 view_normal = normalize(multMtx34Vec3(mdlEnvView.cView, N).xyz);
-    vec3 cubemap_coords = multMtx34Vec3(mdlEnvView.cViewInv, reflect(dir, view_normal.rgb));
+
+    vec3 view_normal = normalize(rotMtx34Vec3(mdlEnvView.cView, N));
+    vec3 reflected = reflect(dir, view_normal);
+    vec3 cubemap_coords = rotMtx34Vec3(mdlEnvView.cViewInv, reflected);
 
     light.N = N;
-    light.I = multMtx34Vec3(mdlEnvView.cView, vec3(0,0,1));
+    light.I = rotMtx34Vec3(mdlEnvView.cView, vec3(0,0,1));
     light.V = normalize(light.I); // view
     light.L = normalize(mdlEnvView.cDirLightViewDirFetchPos.xyz ); // light
     light.H = normalize(light.V + light.L); // half angle
@@ -485,27 +487,26 @@ vec4 CalculateDiffuseIrradianceLight(Light light)
     // irradiance lighting
     if (${program.getShaderOptionBoolean('is_apply_irradiance_pixel')} == true)
     {
-        // TODO: Cubemap based irradiance
-        /*
         if (${program.getShaderOptionBoolean('enable_material_light')} == true)
         {
             const float MAX_LOD = 5.0;
-            vec4 irradiance_cubemap = DecodeCubemap(cTextureMaterialLightCube, dir, MAX_LOD);
-            irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.Exposure.y;
+            vec4 irradiance_cubemap = DecodeCubemap(u_CubemapTexture0, dir, MAX_LOD);
+            irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
         }
         else //use material roughness cubemap
         {
+            // TODO: and TEMP: Roughness cubemap
             const float MAX_LOD = 5.0;
-            vec4 irradiance_cubemap = DecodeCubemap(cTexCubeMapRoughness, dir, MAX_LOD);
-            irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.Exposure.y;
+            vec4 irradiance_cubemap = DecodeCubemap(u_CubemapTexture0, dir, MAX_LOD);
+            irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
         }
         if (${program.getShaderOptionBoolean('enable_material_sphere_light')} == true)
         {
-	        vec2 sphereCoords = light.N.xy * vec2(0.5) + vec2(0.5,0.5);
-            vec4 sphere_light = textureLod(cTextureMaterialLightSphere, sphereCoords, 1.0).xyzw;
-            irradiance.rgba += sphere_light.rgba * mdlEnvView.Exposure.y;
+	        vec2 sphereCoords = light.N.xy * vec2(0.5) + vec2(0.5, 0.5);
+            vec3 sphereCoords3 = vec3(sphereCoords, 0.0);
+            vec4 sphere_light = textureLod(u_CubemapTexture0, sphereCoords3, 1.0);
+            irradiance.rgba += sphere_light.rgba * mdlEnvView.uIrradianceScale;
         }
-        */
     }
     else //calculated per vertex
     {
@@ -560,10 +561,6 @@ void main() {
 
     vec3 specularTerm = vec3(0.0);
     vec3 light_color = v_LightColorVPosZ.xyz;
-
-    // vec3 skyColor = texture(u_CubemapTexture0, normalize(v_Normal)).rgb;
-    // gl_FragColor = vec4(skyColor, 1.0);
-    // return;
 
     // View tangents
     vec3 view_tangent = vec3(1, 0, 0);
@@ -624,22 +621,19 @@ void main() {
         specularTerm += spec_intensity;
     }
 
-    // TODO: finish cubemap
     float spec = metalness * 0.5 + 0.5;
     //use material light cubemap
     if (${program.getShaderOptionBoolean('enable_material_light')} == true)
     {
         const float MAX_LOD = 5.0;
-        // vec4 spec_cubemap = DecodeCubemap(cTextureMaterialLightCube, light.R, roughness * MAX_LOD);
-        // TEMP: no cubemap
-        vec4 spec_cubemap = vec4(0.5, 0.5, 0.5, 1.0);
+        vec4 spec_cubemap = DecodeCubemap(u_CubemapTexture0, light.R, roughness * MAX_LOD);
         specularTerm.rgb += spec * (spec_cubemap.rgb * mdlEnvView.uIrradianceScale) * brdf;
     }
     else
     {
+        // TODO: and TEMP: Roughness cubemap
         const float MAX_LOD = 5.0;
-        // vec4 spec_cubemap = DecodeCubemap(cTexCubeMapRoughness, light.R, roughness * MAX_LOD);
-        vec4 spec_cubemap = vec4(0.5, 0.5, 0.5, 1.0);
+        vec4 spec_cubemap = DecodeCubemap(u_CubemapTexture0, light.R, roughness * MAX_LOD);
         specularTerm.rgb += spec * (spec_cubemap.rgb * mdlEnvView.uIrradianceScale) * brdf;
     }
 

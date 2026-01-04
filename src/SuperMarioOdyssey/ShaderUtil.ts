@@ -78,5 +78,12 @@ export function generateShaderUtil(): string {
     {
         return vec2(mtx.mx.xy * v.x + mtx.mx.zw * v.y + mtx.my.xy);
     }
+
+    vec4 DecodeCubemap(samplerCube cube, vec3 n, float lod) {
+        vec4 tex = textureLod(cube, n, lod);
+
+        float scale = pow(tex.a, mdlEnvView.HDRTranslate_uHDRPower) * mdlEnvView.HDRTranslate_uDynamicRange;
+        return vec4(tex.rgb * scale, scale);
+    }
 `
 };

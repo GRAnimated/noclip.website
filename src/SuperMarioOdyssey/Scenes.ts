@@ -231,7 +231,7 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
                 for (let i = 0; i < entry.ZoneList.length; i++)
                     resourceSystem.fetchData(device, dataFetcher, `StageData/${entry.ZoneList[i].UnitConfigName}Map`);
             if (graphicsPreset) {
-                // resourceSystem.fetchData(device, dataFetcher, `ObjectData/${graphicsPreset.Sky.Name}`);
+                resourceSystem.fetchData(device, dataFetcher, `ObjectData/${graphicsPreset.Sky.Name}`);
             }
             resourceSystem.fetchData(device, dataFetcher, `ObjectData/CubeMap${stageName}`);
 
@@ -250,14 +250,12 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
                     sceneRenderer.fmdlRenderers.push(fmdlRenderer);
                 }
                 if (graphicsPreset) {
-                    /*
                     const skyFmdlData = resourceSystem.getFMDLData(device, `ObjectData/${graphicsPreset.Sky.Name}`);
                     if (skyFmdlData !== null) {
                         const skyRenderer = new SkyRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData);
                         mat4.copy(skyRenderer.modelMatrix, placement);
                         sceneRenderer.fmdlRenderers.push(skyRenderer);
                     }
-                    */
                 }
             }
 

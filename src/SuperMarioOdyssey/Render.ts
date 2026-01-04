@@ -3,7 +3,7 @@ import * as UI from '../ui.js';
 import * as Viewer from '../viewer.js';
 import { TextureHolder, TextureMapping } from '../TextureHolder.js';
 
-import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode, GfxCullMode, GfxCompareMode, GfxInputLayout, GfxBuffer, GfxBufferUsage, GfxFormat, GfxVertexAttributeDescriptor, GfxVertexBufferFrequency, GfxVertexBufferDescriptor, GfxBindingLayoutDescriptor, GfxBlendMode, GfxBlendFactor, GfxProgram, GfxMegaStateDescriptor, GfxIndexBufferDescriptor, GfxInputLayoutBufferDescriptor, makeTextureDescriptor2D, GfxBufferFrequencyHint, GfxChannelWriteMask, GfxTextureDimension, GfxTextureUsage } from '../gfx/platform/GfxPlatform.js';
+import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode, GfxCullMode, GfxCompareMode, GfxInputLayout, GfxBuffer, GfxBufferUsage, GfxFormat, GfxVertexAttributeDescriptor, GfxVertexBufferFrequency, GfxVertexBufferDescriptor, GfxBindingLayoutDescriptor, GfxBlendMode, GfxBlendFactor, GfxProgram, GfxMegaStateDescriptor, GfxIndexBufferDescriptor, GfxInputLayoutBufferDescriptor, makeTextureDescriptor2D, GfxBufferFrequencyHint, GfxChannelWriteMask, GfxTextureDimension, GfxTextureUsage, GfxSamplerFormatKind } from '../gfx/platform/GfxPlatform.js';
 
 import * as BNTX from '../fres_nx/bntx.js';
 import { surfaceToCanvas } from '../Common/bc_texture.js';
@@ -52,6 +52,22 @@ export class BRTITextureHolder extends TextureHolder {
         }
     }
 
+    private cropRGBA(src: Uint8Array, srcWidth: number, srcHeight: number, dstWidth: number, dstHeight: number): Uint8Array {
+        const dst = new Uint8Array(dstWidth * dstHeight * 4);
+
+        for (let y = 0; y < dstHeight; y++) {
+            const srcRow = y * srcWidth * 4;
+            const dstRow = y * dstWidth * 4;
+            dst.set(
+                src.subarray(srcRow, srcRow + dstWidth * 4),
+                dstRow
+            );
+        }
+
+        return dst;
+    }
+
+
     public addTexture(device: GfxDevice, textureEntry: BNTX.BRTI): void {
         // Don't add duplicates.
         if (this.textureNames.includes(textureEntry.name))
@@ -62,6 +78,7 @@ export class BRTITextureHolder extends TextureHolder {
 
         const channelFormat = getChannelFormat(textureEntry.imageFormat);
 
+        // for (let i = 0; i < textureEntry.mipBuffers.length; i++) {
         for (let i = 0; i < textureEntry.mipBuffers.length; i++) {
             const mipLevel = i;
 
@@ -72,9 +89,33 @@ export class BRTITextureHolder extends TextureHolder {
             const blockHeightLog2 = textureEntry.blockHeightLog2;
             deswizzle({ buffer, width, height, channelFormat, blockHeightLog2 }).then((deswizzled) => {
                 const rgbaTexture = decompress({ ...textureEntry, width, height, depth }, deswizzled);
-                const rgbaPixels = rgbaTexture.pixels;
+
+                const decodedWidth  = Math.ceil(width / 4) * 4;
+                const decodedHeight = Math.ceil(height / 4) * 4;
+
+                let rgbaPixels = rgbaTexture.pixels;
+
+                // Small mipmaps like 1x1 may be decoded to a larger size (4x4), so we need to crop them.
+                if (decodedWidth !== width || decodedHeight !== height) {
+                    const cropped = new Uint8Array(width * height * 4);
+
+                    for (let y = 0; y < height; y++) {
+                        const srcRow = y * decodedWidth * 4;
+                        const dstRow = y * width * 4;
+                        cropped.set(
+                            rgbaPixels.subarray(srcRow, srcRow + width * 4),
+                            dstRow
+                        );
+                    }
+
+                    rgbaPixels = cropped;
+                    rgbaTexture.pixels = cropped;
+                    rgbaTexture.width = width;
+                    rgbaTexture.height = height;
+                }
+
                 device.uploadTextureData(gfxTexture, mipLevel, [rgbaPixels]);
-    
+
                 const canvas = document.createElement('canvas');
                 surfaceToCanvas(canvas, rgbaTexture);
                 canvases.push(canvas);
@@ -110,6 +151,9 @@ export class BRTITextureHolder extends TextureHolder {
         const canvases: HTMLCanvasElement[] = [];
         const channelFormat = getChannelFormat(textureEntry.imageFormat);
 
+        const allLevelDatas: ArrayBufferView[] = [];
+        let processedMips = 0;
+
         for (let mipLevel = 0; mipLevel < numMips; mipLevel++) {
             const width = Math.max(textureEntry.width >>> mipLevel, 1);
             const height = Math.max(textureEntry.height >>> mipLevel, 1);
@@ -127,10 +171,22 @@ export class BRTITextureHolder extends TextureHolder {
                     const rgbaPixels = rgbaTexture.pixels;
                     levelDatas[faceIdx] = rgbaPixels;
                     
-                    // Wait until all of the faces are ready so they're uploaded in order
                     if (levelDatas.length === numFaces && levelDatas.every(d => d !== undefined)) {
-                        device.uploadTextureData(gfxTexture, mipLevel, levelDatas);
+                        const bytesPerFace = rgbaPixels.byteLength;
+                        const combinedBuffer = new Uint8Array(bytesPerFace * numFaces);
+                        
+                        for (let i = 0; i < numFaces; i++) {
+                            combinedBuffer.set(new Uint8Array(levelDatas[i].buffer, levelDatas[i].byteOffset, levelDatas[i].byteLength), i * bytesPerFace);
+                        }
+                        
+                        allLevelDatas[mipLevel] = combinedBuffer;
+                        processedMips++;
+                        
+                        if (processedMips === numMips) {
+                            device.uploadTextureData(gfxTexture, 0, allLevelDatas);
+                        }
                     }
+                    
                     if (mipLevel === 0 && faceIdx === 0) {
                         const canvas = document.createElement('canvas');
                         surfaceToCanvas(canvas, rgbaTexture);
@@ -304,7 +360,7 @@ export class AglProgram extends DeviceProgram {
         this.isTranslucent = alphaIsTranslucent && !this.getShaderOptionBoolean(`enable_alphamask`);
 
         this.frag = generateShaderUtil() + generateFragmentShader(this);
-        this.vert = generateShaderUtil() + generateVertexShader();
+        this.vert = generateShaderUtil() + generateVertexShader(this);
     }
 
     public static globalDefinitions = `
@@ -619,7 +675,7 @@ class FMATInstance {
         // Fill in our texture mappings.
         assert(fmat.samplerInfo.length === fmat.textureName.length);
 
-        this.textureMapping = nArray(8, () => new TextureMapping());
+        this.textureMapping = nArray(9, () => new TextureMapping());
         for (let i = 0; i < fmat.samplerInfo.length; i++) {
             const samplerInfo = fmat.samplerInfo[i];
             const gfxSampler = cache.createSampler({
@@ -637,6 +693,25 @@ class FMATInstance {
             textureHolder.fillTextureMapping(this.textureMapping[i], textureName);
             (this.textureMapping[i] as any).name = textureName;
             this.textureMapping[i].gfxSampler = gfxSampler;
+        }
+
+        const cubemapTextureName = textureHolder.textureNames.find(name => name === 'Default_');
+        if (cubemapTextureName) {
+            const gfxSampler = cache.createSampler({
+                minFilter: GfxTexFilterMode.Bilinear,
+                magFilter: GfxTexFilterMode.Bilinear,
+                mipFilter: GfxMipFilterMode.Linear,
+                minLOD: 0,
+                maxLOD: 100,
+                wrapS: GfxWrapMode.Clamp,
+                wrapT: GfxWrapMode.Clamp,
+            });
+            this.gfxSamplers.push(gfxSampler);
+
+            textureHolder.fillTextureMapping(this.textureMapping[8], cubemapTextureName);
+            this.textureMapping[8].gfxSampler = gfxSampler;
+        } else {
+            console.info('No cubemap found for material', fmat.name);
         }
 
         this.gfxProgram = cache.createProgram(this.program);
@@ -1170,7 +1245,7 @@ class FSHPInstance {
         d[offs++] = 2.2;  // HDRTranslate_uDynamicRange
         offs += 2;          // padding
         
-        const lightDir = vec3.fromValues(0.3, 0.7, -0.2);
+        const lightDir = vec3.fromValues(0.3, 0.9, -0.2);
         vec3.normalize(lightDir, lightDir);
         // cDirLightViewDirFetchPos
         d[offs++] = lightDir[0];
@@ -1280,7 +1355,17 @@ class FSHPInstance {
 }
 
 const bindingLayouts: GfxBindingLayoutDescriptor[] = [
-    { numUniformBuffers: 4, numSamplers: 9 }, // Scene
+    { numUniformBuffers: 4, numSamplers: 9, samplerEntries: [
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.Cube, formatKind: GfxSamplerFormatKind.Float, },
+    ] }
 ];
 
 export class FMDLRenderer {
