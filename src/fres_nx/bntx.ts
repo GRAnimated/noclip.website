@@ -17,7 +17,7 @@ export interface BRTI {
     height: number;
     depth: number;
     arraySize: number;
-    mipBuffers: ArrayBufferSlice[];
+    mipBuffers: ArrayBufferSlice[] | ArrayBufferSlice[][];
     blockHeightLog2: number;
 }
 

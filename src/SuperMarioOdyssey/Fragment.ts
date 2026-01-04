@@ -561,6 +561,10 @@ void main() {
     vec3 specularTerm = vec3(0.0);
     vec3 light_color = v_LightColorVPosZ.xyz;
 
+    // vec3 skyColor = texture(u_CubemapTexture0, normalize(v_Normal)).rgb;
+    // gl_FragColor = vec4(skyColor, 1.0);
+    // return;
+
     // View tangents
     vec3 view_tangent = vec3(1, 0, 0);
     vec3 view_bitangent = vec3(1, 0, 1);

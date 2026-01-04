@@ -233,7 +233,6 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
             if (graphicsPreset) {
                 // resourceSystem.fetchData(device, dataFetcher, `ObjectData/${graphicsPreset.Sky.Name}`);
             }
-            // Cubemap
             resourceSystem.fetchData(device, dataFetcher, `ObjectData/CubeMap${stageName}`);
 
             await resourceSystem.waitForLoad();
@@ -259,13 +258,6 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
                         sceneRenderer.fmdlRenderers.push(skyRenderer);
                     }
                     */
-                }
-                // Cubemap
-                const cubeMapFres = resourceSystem.findFRES(`ObjectData/CubeMap${stageName}`);
-                if (cubeMapFres !== null) {
-                    const textureHolder = new BRTITextureHolder();
-                    const texturesFile = cubeMapFres.externalFiles.find((file) => file.name === 'textures.bntx');
-                    textureHolder.addBNTXFile(device, texturesFile!.buffer);
                 }
             }
 

@@ -3,7 +3,7 @@ import * as UI from '../ui.js';
 import * as Viewer from '../viewer.js';
 import { TextureHolder, TextureMapping } from '../TextureHolder.js';
 
-import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode, GfxCullMode, GfxCompareMode, GfxInputLayout, GfxBuffer, GfxBufferUsage, GfxFormat, GfxVertexAttributeDescriptor, GfxVertexBufferFrequency, GfxVertexBufferDescriptor, GfxBindingLayoutDescriptor, GfxBlendMode, GfxBlendFactor, GfxProgram, GfxMegaStateDescriptor, GfxIndexBufferDescriptor, GfxInputLayoutBufferDescriptor, makeTextureDescriptor2D, GfxBufferFrequencyHint, GfxChannelWriteMask } from '../gfx/platform/GfxPlatform.js';
+import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode, GfxCullMode, GfxCompareMode, GfxInputLayout, GfxBuffer, GfxBufferUsage, GfxFormat, GfxVertexAttributeDescriptor, GfxVertexBufferFrequency, GfxVertexBufferDescriptor, GfxBindingLayoutDescriptor, GfxBlendMode, GfxBlendFactor, GfxProgram, GfxMegaStateDescriptor, GfxIndexBufferDescriptor, GfxInputLayoutBufferDescriptor, makeTextureDescriptor2D, GfxBufferFrequencyHint, GfxChannelWriteMask, GfxTextureDimension, GfxTextureUsage } from '../gfx/platform/GfxPlatform.js';
 
 import * as BNTX from '../fres_nx/bntx.js';
 import { surfaceToCanvas } from '../Common/bc_texture.js';
@@ -41,8 +41,15 @@ export class BRTITextureHolder extends TextureHolder {
 
     public addBNTXFile(device: GfxDevice, buffer: ArrayBufferSlice): void {
         const bntx = BNTX.parse(buffer);
-        for (let i = 0; i < bntx.textures.length; i++)
-            this.addTexture(device, bntx.textures[i]);
+        for (let i = 0; i < bntx.textures.length; i++) {
+            const texName = bntx.textures[i].name;
+            // TODO: Load every cubemap
+            if (texName.startsWith("Default_") || texName.startsWith("SkyOnly_")) {
+                this.addCubemapTexture(device, bntx.textures[i]);
+            } else {
+                this.addTexture(device, bntx.textures[i]);
+            }
+        }
     }
 
     public addTexture(device: GfxDevice, textureEntry: BNTX.BRTI): void {
@@ -58,7 +65,7 @@ export class BRTITextureHolder extends TextureHolder {
         for (let i = 0; i < textureEntry.mipBuffers.length; i++) {
             const mipLevel = i;
 
-            const buffer = textureEntry.mipBuffers[i];
+            const buffer = textureEntry.mipBuffers[i] as ArrayBufferSlice;
             const width = Math.max(textureEntry.width >>> mipLevel, 1);
             const height = Math.max(textureEntry.height >>> mipLevel, 1);
             const depth = 1;
@@ -72,6 +79,65 @@ export class BRTITextureHolder extends TextureHolder {
                 surfaceToCanvas(canvas, rgbaTexture);
                 canvases.push(canvas);
             });
+        }
+
+        const extraInfo = new Map<string, string>();
+        extraInfo.set('Format', getImageFormatString(textureEntry.imageFormat));
+
+        const viewerTexture: Viewer.Texture = { name: textureEntry.name, surfaces: canvases, extraInfo };
+        this.gfxTextures.push(gfxTexture);
+        this.viewerTextures.push(viewerTexture);
+        this.textureNames.push(textureEntry.name);
+    }
+
+    public addCubemapTexture(device: GfxDevice, textureEntry: BNTX.BRTI): void {
+        // Don't add duplicates.
+        if (this.textureNames.includes(textureEntry.name))
+            return;
+
+        const numFaces = 6;
+        const numMips = textureEntry.mipBuffers.length;
+        const gfxTexture = device.createTexture({
+            dimension: GfxTextureDimension.Cube,
+            pixelFormat: translateImageFormat(textureEntry.imageFormat),
+            width: textureEntry.width,
+            height: textureEntry.height,
+            depthOrArrayLayers: numFaces,
+            numLevels: numMips,
+            usage: GfxTextureUsage.Sampled
+        });
+
+        const canvases: HTMLCanvasElement[] = [];
+        const channelFormat = getChannelFormat(textureEntry.imageFormat);
+
+        for (let mipLevel = 0; mipLevel < numMips; mipLevel++) {
+            const width = Math.max(textureEntry.width >>> mipLevel, 1);
+            const height = Math.max(textureEntry.height >>> mipLevel, 1);
+            const depth = 1;
+            const blockHeightLog2 = textureEntry.blockHeightLog2;
+
+            const levelDatas: ArrayBufferView[] = [];
+            
+            for (let faceIdx = 0; faceIdx < numFaces; faceIdx++) {
+                const mipBuffer = textureEntry.mipBuffers[mipLevel];
+                const buffer = Array.isArray(mipBuffer) ? mipBuffer[faceIdx] as ArrayBufferSlice : mipBuffer as ArrayBufferSlice;
+                
+                deswizzle({ buffer, width, height, channelFormat, blockHeightLog2 }).then((deswizzled) => {
+                    const rgbaTexture = decompress({ ...textureEntry, width, height, depth }, deswizzled);
+                    const rgbaPixels = rgbaTexture.pixels;
+                    levelDatas[faceIdx] = rgbaPixels;
+                    
+                    // Wait until all of the faces are ready so they're uploaded in order
+                    if (levelDatas.length === numFaces && levelDatas.every(d => d !== undefined)) {
+                        device.uploadTextureData(gfxTexture, mipLevel, levelDatas);
+                    }
+                    if (mipLevel === 0 && faceIdx === 0) {
+                        const canvas = document.createElement('canvas');
+                        surfaceToCanvas(canvas, rgbaTexture);
+                        canvases.push(canvas);
+                    }
+                });
+            }
         }
 
         const extraInfo = new Map<string, string>();
@@ -202,7 +268,8 @@ export class AglProgram extends DeviceProgram {
     public static _u1: number = 5;
     public static _u2: number = 6;
     public static _u3: number = 7;
-    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3' ];
+    public static _q0: number = 8; // cubemap
+    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3', '_q0'];
 
     public static ub_ShapeParams = 0;
     public static ub_MdlEnvView = 1; // and ub_HDRTranslate
@@ -361,6 +428,7 @@ uniform sampler2D u_Texture4;
 uniform sampler2D u_Texture5;
 uniform sampler2D u_Texture6;
 uniform sampler2D u_Texture7;
+uniform samplerCube u_CubemapTexture0;
 `;
 
     public override both = AglProgram.globalDefinitions;
@@ -415,6 +483,15 @@ uniform sampler2D u_Texture7;
         } catch(e) {
             // TODO(jstpierre): Figure out wtf is going on.
             // console.warn(`${this.name}: No sampler by name ${shadingModelSamplerBindingName}`);
+            return `vec4(1.0)`;
+        }
+    }
+
+    public genCubeSample(shadingModelSamplerBindingName: string, direction: string): string {
+        try {
+            const samplerIndex = this.lookupSamplerIndex(shadingModelSamplerBindingName);
+            return `texture(u_CubemapTexture${samplerIndex}, normalize(${direction}))`;
+        } catch (e) {
             return `vec4(1.0)`;
         }
     }
@@ -1203,7 +1280,7 @@ class FSHPInstance {
 }
 
 const bindingLayouts: GfxBindingLayoutDescriptor[] = [
-    { numUniformBuffers: 4, numSamplers: 8 }, // Scene
+    { numUniformBuffers: 4, numSamplers: 9 }, // Scene
 ];
 
 export class FMDLRenderer {

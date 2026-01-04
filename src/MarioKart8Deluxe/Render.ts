@@ -58,7 +58,7 @@ export class BRTITextureHolder extends TextureHolder {
         for (let i = 0; i < textureEntry.mipBuffers.length; i++) {
             const mipLevel = i;
 
-            const buffer = textureEntry.mipBuffers[i];
+            const buffer = textureEntry.mipBuffers[i] as ArrayBufferSlice;
             const width = Math.max(textureEntry.width >>> mipLevel, 1);
             const height = Math.max(textureEntry.height >>> mipLevel, 1);
             const depth = 1;
