@@ -6,7 +6,7 @@ import { DataFetcher } from '../DataFetcher.js';
 import * as SARC from '../fres_nx/sarc.js';
 import * as BFRES from '../fres_nx/bfres.js';
 import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
-import { BRTITextureHolder, BasicFRESRenderer, FMDLRenderer, FMDLData } from './Render.js';
+import { BRTITextureHolder, BasicFRESRenderer, FMDLRenderer, FMDLData, SkyRenderer } from './Render.js';
 import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { assert, assertExists } from '../util.js';
 import { mat4 } from 'gl-matrix';
@@ -222,6 +222,8 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
                 }
             }
 
+            console.log(graphicsPreset);
+
             if (entry.ObjectList !== undefined)
                 for (let i = 0; i < entry.ObjectList.length; i++)
                     resourceSystem.fetchData(device, dataFetcher, `ObjectData/${entry.ObjectList[i].UnitConfigName}`);
@@ -247,11 +249,10 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
                     sceneRenderer.fmdlRenderers.push(fmdlRenderer);
                 }
                 if (graphicsPreset) {
-                    // TODO: The sky's texture errors, lets fix it another time
                     /*
                     const skyFmdlData = resourceSystem.getFMDLData(device, `ObjectData/${graphicsPreset.Sky.Name}`);
                     if (skyFmdlData !== null) {
-                        const skyRenderer = new FMDLRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData);
+                        const skyRenderer = new SkyRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData);
                         mat4.copy(skyRenderer.modelMatrix, placement);
                         sceneRenderer.fmdlRenderers.push(skyRenderer);
                     }

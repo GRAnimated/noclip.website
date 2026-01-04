@@ -3,7 +3,7 @@ import * as UI from '../ui.js';
 import * as Viewer from '../viewer.js';
 import { TextureHolder, TextureMapping } from '../TextureHolder.js';
 
-import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode, GfxCullMode, GfxCompareMode, GfxInputLayout, GfxBuffer, GfxBufferUsage, GfxFormat, GfxVertexAttributeDescriptor, GfxVertexBufferFrequency, GfxVertexBufferDescriptor, GfxBindingLayoutDescriptor, GfxBlendMode, GfxBlendFactor, GfxProgram, GfxMegaStateDescriptor, GfxIndexBufferDescriptor, GfxInputLayoutBufferDescriptor, makeTextureDescriptor2D, GfxBufferFrequencyHint } from '../gfx/platform/GfxPlatform.js';
+import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode, GfxCullMode, GfxCompareMode, GfxInputLayout, GfxBuffer, GfxBufferUsage, GfxFormat, GfxVertexAttributeDescriptor, GfxVertexBufferFrequency, GfxVertexBufferDescriptor, GfxBindingLayoutDescriptor, GfxBlendMode, GfxBlendFactor, GfxProgram, GfxMegaStateDescriptor, GfxIndexBufferDescriptor, GfxInputLayoutBufferDescriptor, makeTextureDescriptor2D, GfxBufferFrequencyHint, GfxChannelWriteMask } from '../gfx/platform/GfxPlatform.js';
 
 import * as BNTX from '../fres_nx/bntx.js';
 import { surfaceToCanvas } from '../Common/bc_texture.js';
@@ -27,7 +27,9 @@ import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { GfxShaderLibrary } from '../gfx/helpers/GfxShaderLibrary.js';
 import { createBufferFromData, createBufferFromSlice } from '../gfx/helpers/BufferHelpers.js';
 import { generateFragmentShader } from './Fragment.js';
+import { generateSkyFragmentShader } from './SkyFragment.js';
 import { generateVertexShader } from './Vertex.js';
+import { generateSkyVertexShader } from './SkyVertex.js';
 import { generateShaderUtil } from './ShaderUtil.js';
 
 export class BRTITextureHolder extends TextureHolder {
@@ -219,6 +221,12 @@ export class AglProgram extends DeviceProgram {
         this.name = this.fmat.name;
         assert(this.fmat.samplerInfo.length <= 8);
 
+        if (this.fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
+            this.frag = generateShaderUtil() + generateSkyFragmentShader(this);
+            this.vert = generateShaderUtil() + generateSkyVertexShader();
+            return;
+        }
+
         if (this.getShaderOptionNumber('vtxcolor_type') >= 0)
             this.defines.set('OPT_vtxcolor', '1');
 
@@ -231,6 +239,7 @@ export class AglProgram extends DeviceProgram {
         this.isTranslucent = alphaIsTranslucent && !this.getShaderOptionBoolean(`enable_alphamask`);
 
         this.frag = generateShaderUtil() + generateFragmentShader(this);
+        this.vert = generateShaderUtil() + generateVertexShader();
     }
 
     public static globalDefinitions = `
@@ -381,122 +390,54 @@ uniform sampler2D u_Texture7;
         return this.getShaderOptionBoolean(optionName) ? branchTrue() : branchFalse();
     }
 
-    // Blend has different components for some reason
-    /*
-    public generateBlendComponentMask(mask: number): string {
-        if      (mask == 10)  return '.rgba';
-        else if (mask == 20)  return '.rrrr';
-        else if (mask == 30)  return '.gggg';
-        else if (mask == 40)  return '.bbbb';
-        else if (mask == 50)  return '.aaaa';
-        else if (mask == 11)  return '1.0 - .rgba';
-        else if (mask == 21)  return '1.0 - .rrrr';
-        else if (mask == 31)  return '1.0 - .gggg';
-        else if (mask == 41)  return '1.0 - .bbbb';
-        else if (mask == 51)  return '1.0 - .aaaa';
-        return '.rgba';
-    }
-    */
-
-    public generateComponentMask(mask: number): string {
-        if      (mask == 10)  return '.rgba';
-        else if (mask == 30)  return '.rrrr';
-        else if (mask == 40)  return '.gggg';
-        else if (mask == 50)  return '.bbbb';
-        else if (mask == 60)  return '.aaaa';
-        else if (mask == 70)  return 'clamp(1.0 - .rrrr, 0.0, 1.0)';
-        else if (mask == 80)  return 'clamp(1.0 - .gggg, 0.0, 1.0)';
-        else if (mask == 90)  return 'clamp(1.0 - .bbbb, 0.0, 1.0)';
-        else if (mask == 100) return 'clamp(1.0 - .aaaa, 0.0, 1.0)';
-        return '.rgba';
+    public selectTexCoord(mtx_select: number): string {
+        if (mtx_select == 10)  //tex coord 0
+            return 'v_TexCoord0';
+        else if  (mtx_select == 11) //tex coord 1
+            return 'v_TexCoord1';
+        else if  (mtx_select == 12) //tex coord 2
+            return 'v_TexCoord2';
+        else if  (mtx_select == 13) //tex coord 3
+            return 'v_TexCoord3';
+        else if  (mtx_select == 20) //indirect coord 0
+            return 'v_IrradianceVertex.xy'; // is this right?
+        else if  (mtx_select == 21) //indirect coord 1
+            return 'v_IrradianceVertex.zw'; // same here
+        else if  (mtx_select == 30) //sphere mapping
+            return 'v_SphereCoords.xy';
+        else //TODO 50 - 54 are proj texture types
+            return 'v_TexCoord0.xy';
     }
 
-    public genSample(shadingModelSamplerBindingName: string, uvIdx: number = 0): string {
+    public genSample(shadingModelSamplerBindingName: string, texCoord: string, additional: string = ''): string {
         try {
             const samplerIndex = this.lookupSamplerIndex(shadingModelSamplerBindingName);
-            const uv = `v_TexCoord${uvIdx}`;
-            return `texture(u_Texture${samplerIndex}, vec2(${uv}.x, ${uv}.y))`;
+            const uv = texCoord;
+            return `texture(u_Texture${samplerIndex}, vec2(${uv}.x, ${uv}.y)${additional})`;
         } catch(e) {
             // TODO(jstpierre): Figure out wtf is going on.
-            console.warn(`${this.name}: No sampler by name ${shadingModelSamplerBindingName}`);
+            // console.warn(`${this.name}: No sampler by name ${shadingModelSamplerBindingName}`);
             return `vec4(1.0)`;
         }
     }
 
-    public genBlend(instance: number): string {
-        const enable = this.getShaderOptionBoolean(`enable_blend${instance}`);
-        if (!enable) return 'vec4(0.0)';
-
-        const srcId = `blend${instance}_src`;
-        const dstId = `blend${instance}_dst`;
-        const cofId = `blend${instance}_cof`;
-        const cofMapId = `blend${instance}_cof_map`;
-        const equation = this.getShaderOptionNumber(`blend${instance}_eq`);
-
-        const src = `${this.genOutput(srcId)}${this.genOutputCompMask(`blend${instance}_src_ch`)}`;
-        const dst = `${this.genOutput(dstId)}${this.genOutputCompMask(`blend${instance}_dst_ch`)}`;
-        const cof = `CalculateCofBlendOutput(${this.getShaderOptionNumber(cofId)}, ${this.getShaderOptionNumber(cofMapId)})${this.genOutputCompMask(`blend${instance}_cof_ch`)}`;
-
-        switch (equation) {
-            case 0: return `((${src} - ${dst}) * ${cof} + ${dst})`;
-            case 1: return `(${dst} * ${cof} + ${src})`;
-            case 2: return `(${dst} * ${cof} * ${src})`;
-            case 3: return `(${dst} * -${cof} + ${src})`;
-            case 4: return `(${dst} + ${cof} + ${src})`;
-            case 7: return `((${src} + ${dst}) * ${cof})`;
-            case 8: return `((${src} - ${dst}) * ${cof})`;
-            default: return src;
-        }
-    }
-
-    public genOutputCompMask(optionName: string): string {
-        return this.generateComponentMask(this.getShaderOptionNumber(optionName));
+    public genUniform(num: number): string {
+        return `
+            CalculateUniform(u_Texture${num},
+            ${this.getShaderOptionNumber(`uniform${num}_fuv_selector`)},
+            ${this.getShaderOptionBoolean(`enable_uniform${num}`)},
+            mat.uniform${num}_mul_color,
+            ${this.getShaderOptionBoolean(`enable_uniform${num}_mul_color`)},
+            ${this.getShaderOptionBoolean(`enable_uniform${num}_mul_vtxcolor`)},
+            ${this.getShaderOptionBoolean(`enable_uniform${num}_roughness_lod`)},
+            vec2(0.0))
+        `;
     }
 
     public genOutput(optionName: string): string {
         const n = this.getShaderOptionNumber(optionName);
 
-        switch (n) {
-            case 10: return this.genSample('_a0'); // Base Color
-            case 15: return `v_VtxColor`;          // Vertex Color
-            case 20: return this.genSample('_n0'); // Normal Map
-            case 30: return `vec4(GetWorldNormal().xyz, 0.0)`; // World Normal
-            // Uniforms
-            case 50: return this.genSample('_u0');
-            case 51: return this.genSample('_u1');
-            case 52: return this.genSample('_u2');
-            case 53: return this.genSample('_u3');
-            case 54: return this.genSample('_u4');
-            
-            case 60: return `mat.const_color0`;     
-            case 61: return `mat.const_color1`;     
-            case 62: return `mat.const_color2`;     
-            case 63: return `mat.const_color3`;     
-            
-            case 70: return `texture(u_Texture0, v_TexCoord0)`; // TODO: FB sampler
-            case 78: return `texture(u_Texture1, v_TexCoord0)`; // TODO: Depth sampler
-            
-            case 80: return this.genBlend(0);
-            case 81: return this.genBlend(1);
-            case 82: return this.genBlend(2);
-            case 83: return this.genBlend(3);
-            case 84: return this.genBlend(4);
-            case 85: return this.genBlend(5);
-
-            case 110: return `vec4(mat.const_single0)`;
-            case 111: return `vec4(mat.const_single1)`;
-            case 112: return `vec4(mat.const_single2)`;
-            case 113: return `vec4(mat.const_single3)`;
-            
-            case 115: return `vec4(0.0)`;
-            case 116: return `vec4(1.0)`;
-            case 140: return `vec4(modelInfo.uv_offset, 0.0, 0.0)`;
-            case 160: return `texture(u_Texture2, v_TexCoord0)`; // u_ProcTexture2D
-            case 170: return `texture(u_Texture3, v_PositionWorld * mat.proc_texture_3d_scale.xyz)`;
-            
-            default:
-                return `vec4(1.0, 0.0, 1.0, 1.0)`; 
-        }
+        return `CalculateOutput(${n})`;
     }
 
     public blendIsTranslucent(instance: number): boolean {
@@ -513,8 +454,6 @@ uniform sampler2D u_Texture7;
         if (n >= 80 && n <= 85) return this.blendIsTranslucent(n - 80);
         return true; 
     }
-
-    public override vert = generateShaderUtil() + generateVertexShader();
 }
 
 function translateRenderInfoSingleString(renderInfo: FMAT_RenderInfo): string {
@@ -620,12 +559,24 @@ class FMATInstance {
         this.gfxProgram = cache.createProgram(this.program);
 
         // Render flags.
+        if (this.fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
+            return;
+        }
+
         const isTranslucent = this.program.isTranslucent;
-        this.megaStateFlags = {
-            cullMode:       translateCullMode(fmat),
-            depthCompare:   reverseDepthForCompareMode(translateDepthCompare(fmat)),
-            depthWrite:     isTranslucent ? false : translateDepthWrite(fmat),
-        };
+        if (fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
+            this.megaStateFlags = {
+                cullMode:       GfxCullMode.None,
+                depthCompare:   reverseDepthForCompareMode(GfxCompareMode.LessEqual),
+                depthWrite:     false,
+            };
+        } else {
+            this.megaStateFlags = {
+                cullMode:       translateCullMode(fmat),
+                depthCompare:   reverseDepthForCompareMode(translateDepthCompare(fmat)),
+                depthWrite:     isTranslucent ? false : translateDepthWrite(fmat),
+            };
+        }
         setAttachmentStateSimple(this.megaStateFlags, {
             blendMode: GfxBlendMode.Add,
             blendSrcFactor: isTranslucent ? translateBlendSrcFactor(fmat) : GfxBlendFactor.One,
@@ -642,7 +593,27 @@ class FMATInstance {
         renderInst.sortKey = makeSortKey(materialLayer, 0);
         renderInst.setSamplerBindingsFromTextureMappings(this.textureMapping);
         renderInst.setGfxProgram(this.gfxProgram);
-        renderInst.setMegaStateFlags(this.megaStateFlags);
+        if (this.fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
+            renderInst.setMegaStateFlags({
+                attachmentsState: [
+                    {
+                        channelWriteMask: GfxChannelWriteMask.AllChannels,
+                        rgbBlendState: {
+                            blendMode: GfxBlendMode.Add,
+                            blendSrcFactor: GfxBlendFactor.SrcAlpha,
+                            blendDstFactor: GfxBlendFactor.OneMinusSrcAlpha,
+                        },
+                        alphaBlendState: {
+                            blendMode: GfxBlendMode.Add,
+                            blendSrcFactor: GfxBlendFactor.One,
+                            blendDstFactor: GfxBlendFactor.OneMinusSrcAlpha,
+                        },
+                    }
+                ],
+            });
+        } else {
+            renderInst.setMegaStateFlags(this.megaStateFlags);
+        }
     }
 
     public destroy(device: GfxDevice): void {
@@ -1270,6 +1241,32 @@ export class FMDLRenderer {
     public destroy(device: GfxDevice): void {
         for (let i = 0; i < this.fmatInst.length; i++)
             this.fmatInst[i].destroy(device);
+    }
+}
+
+export class SkyRenderer extends FMDLRenderer {
+    constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, fmdlData: FMDLData) {
+        super(device, cache, textureHolder, fmdlData);
+
+        this.modelMatrix[5] = 200.0 * this.modelMatrix[5];
+    }
+
+    public override prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
+        if (!this.visible)
+            return;
+
+        mat4.identity(this.modelMatrix);
+        this.modelMatrix[12] = viewerInput.camera.worldMatrix[12];
+        this.modelMatrix[13] = viewerInput.camera.worldMatrix[13] - 300000;
+        this.modelMatrix[14] = viewerInput.camera.worldMatrix[14];
+
+        const template = renderInstManager.pushTemplate();
+        template.setBindingLayouts(bindingLayouts);
+
+        for (let i = 0; i < this.fshpInst.length; i++)
+            this.fshpInst[i].prepareToRender(device, renderInstManager, this.modelMatrix, viewerInput);
+
+        renderInstManager.popTemplate();
     }
 }
 

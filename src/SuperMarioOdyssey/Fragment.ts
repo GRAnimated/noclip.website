@@ -19,6 +19,26 @@ in vec4 v_IrradianceVertex;
 in vec2 v_SphereCoords;
 in vec4 v_PerspDiv;
 
+vec2 SelectTexCoord(int mtx_select)
+{
+    if (mtx_select == 10)  //tex coord 0
+        return v_TexCoord0;
+    else if  (mtx_select == 11) //tex coord 1
+        return v_TexCoord1;
+    else if  (mtx_select == 12) //tex coord 2
+        return v_TexCoord2;
+    else if  (mtx_select == 13) //tex coord 3
+        return v_TexCoord3;
+    else if  (mtx_select == 20) //indirect coord 0
+        return v_IrradianceVertex.xy; // is this right?
+    else if  (mtx_select == 21) //indirect coord 1
+        return v_IrradianceVertex.zw; // same here
+    else if  (mtx_select == 30) //sphere mapping
+        return v_SphereCoords.xy;
+    else //TODO 50 - 54 are proj texture types
+        return v_TexCoord0.xy;
+}
+
 vec3 GetWorldNormal() {
     return normalize(v_Normal);
 }
@@ -29,6 +49,22 @@ vec3 GetWorldBitangent() {
 
 vec3 GetWorldTangent() {
     return normalize(v_Tangents.xyz);
+}
+
+vec4 CalculateUniform(sampler2D cTexture, int uv_selector, bool enable, vec4 mul_color,
+    bool enable_mul_color, bool enable_mul_vtx_color, bool enable_roughness_lod, vec2 tex_bias)
+{
+    vec4 uniform_output = vec4(1.0);
+    if (enable) //Todo third argument uses MdlEnvView.data[0x12A].x, a global LOD value
+        uniform_output = texture(cTexture, SelectTexCoord(uv_selector) + tex_bias);
+    if (enable_roughness_lod)
+        uniform_output = textureLod(cTexture, SelectTexCoord(uv_selector), 0.0);
+    if (enable_mul_color)
+        uniform_output *= mul_color;
+    if (enable_mul_vtx_color)
+        uniform_output *= v_VtxColor;
+
+    return uniform_output;
 }
 
 vec3 calcSpecularGGX(float roughness, vec3 f0, vec3 N, vec3 V, vec3 L, vec3 H)
@@ -130,28 +166,224 @@ vec4 CalculateSphereConstColor(int sphere_color_type, vec4 const_color, float sp
         return const_color; // type 0 defaults to const color
 }
 
-vec4 CALCULATE_CONST_COLOR(int sphere_color_type, vec4 const_color, float sphere_rate_color) {
-    return CalculateSphereConstColor(sphere_color_type, const_color, sphere_rate_color);
+vec4 CalculateProcTexture2D() {
+    // TODO: stub
+    return vec4(1.0, 1.0, 1.0, 1.0);
 }
 
-vec4 CalculateCofBlendOutput(int flag, int cof_map) {
+vec4 CalculateProcTexture3D() {
+    // TODO: stub
+    return vec4(1.0, 1.0, 1.0, 1.0);
+}
+
+vec4 CalculateBaseColor(vec2 tex_bias)
+{
+    vec4 basecolor_output = vec4(1.0);
+    if (${program.getShaderOptionBoolean('enable_base_color')}) //Todo third argument uses MdlEnvView.data[0x12A].x, a global LOD value
+        basecolor_output = (${program.genSample("_a0", program.selectTexCoord(program.getShaderOptionNumber('base_color_fuv_selector')), ' + tex_bias')});
+    if (${program.getShaderOptionBoolean('enable_base_color_mul_color')})
+        basecolor_output *= mat.base_color_mul_color;
+    if (${program.getShaderOptionNumber('vtxcolor_type') == 0}) // VTX_COLOR_TYPE_DIFFUSE
+        basecolor_output.rgb *= v_VtxColor.rgb;
+    else if (${program.getShaderOptionNumber('vtxcolor_type') == 3}) // VTX_COLOR_TYPE_DIFFUSE_BLEND
+       basecolor_output.rgb *= (1.0 - v_VtxColor.rgb * v_VtxColor.rgb);
+
+    return basecolor_output;
+}
+
+vec4 BLEND0_OUTPUT;
+vec4 BLEND1_OUTPUT;
+vec4 BLEND2_OUTPUT;
+vec4 BLEND3_OUTPUT;
+vec4 BLEND4_OUTPUT;
+vec4 BLEND5_OUTPUT;
+
+vec4 CalculateOutput(int flag)
+{
+    if (flag == 10) return CalculateBaseColor(vec2(0.0));
+    else if (flag == 15) return v_VtxColor;
+    else if (flag == 20) {
+        // Normal map
+        return texture(u_Texture1, ${program.selectTexCoord(program.getShaderOptionNumber('normal_fuv_selector'))});
+    }
+    else if (flag == 30) return vec4(GetWorldNormal().xyz, 0.0); // World Normal
+
+    else if (flag == 50) return ${program.genUniform(0)};
+    else if (flag == 51) return ${program.genUniform(1)};
+    else if (flag == 52) return ${program.genUniform(2)};
+    else if (flag == 53) return ${program.genUniform(3)};
+    else if (flag == 54) return ${program.genUniform(4)};
+    else if (flag == 60) return mat.const_color0;
+    else if (flag == 61) return mat.const_color1;
+    else if (flag == 62) return mat.const_color2;
+    else if (flag == 63) return mat.const_color3;
+
+    else if (flag == 70) return texture(u_Texture0, v_TexCoord0); // FB sampler TODO
+    else if (flag == 78) return texture(u_Texture1, v_TexCoord0); // Depth sampler TODO
+
+    else if (flag == 80) return BLEND0_OUTPUT;
+    else if (flag == 81) return BLEND1_OUTPUT;
+    else if (flag == 82) return BLEND2_OUTPUT;
+    else if (flag == 83) return BLEND3_OUTPUT;
+    else if (flag == 84) return BLEND4_OUTPUT;
+    else if (flag == 85) return BLEND5_OUTPUT;
+
+    else if (flag == 110) return vec4(mat.const_single0);
+    else if (flag == 111) return vec4(mat.const_single1);
+    else if (flag == 112) return vec4(mat.const_single2);
+    else if (flag == 113) return vec4(mat.const_single3);
+
+    else if (flag == 115) return vec4(0.0);
+    else if (flag == 116) return vec4(1.0);
+    else if (flag == 140) return vec4(modelInfo.uv_offset, 0.0, 0.0);
+    else if (flag == 160) return CalculateProcTexture2D(); // ProcTexture2D
+    else if (flag == 170) return CalculateProcTexture3D();
+
+    return vec4(1.0, 0.0, 1.0, 1.0);
+}
+
+vec4 CalculateCofBlendOutput(int flag, int cof_map)
+{
     if (flag == 10)      return v_VtxColor;
-    // else if (flag == 20) return CalculateBlendOutput(cof_map); // cof_map
+    else if (flag == 20) return CalculateOutput(cof_map);
 
-    else if (flag == 30) return vec4(mat.const_single0); // mat.const_single0
-    else if (flag == 31) return vec4(mat.const_single1); // mat.const_single1
-    else if (flag == 32) return vec4(mat.const_single2); // mat.const_single2
-    else if (flag == 33) return vec4(mat.const_single3); // mat.const_single3
+    else if (flag == 30) return vec4(mat.const_single0);
+    else if (flag == 31) return vec4(mat.const_single1);
+    else if (flag == 32) return vec4(mat.const_single2);
+    else if (flag == 33) return vec4(mat.const_single3);
 
-    else if (flag == 60) return CALCULATE_CONST_COLOR(${program.getShaderOptionNumber('sphere_const_color0')}, mat.const_color0, mat.sphere_rate_color0); // mat.const_color0
-    else if (flag == 61) return CALCULATE_CONST_COLOR(${program.getShaderOptionNumber('sphere_const_color1')}, mat.const_color1, mat.sphere_rate_color1); // mat.const_color1
-    else if (flag == 62) return CALCULATE_CONST_COLOR(${program.getShaderOptionNumber('sphere_const_color2')}, mat.const_color2, mat.sphere_rate_color2); // mat.const_color2
-    else if (flag == 63) return CALCULATE_CONST_COLOR(${program.getShaderOptionNumber('sphere_const_color3')}, mat.const_color3, mat.sphere_rate_color3); // mat.const_color3
+    else if (flag == 60) return CalculateSphereConstColor(0, mat.const_color0, mat.sphere_rate_color0);
+    else if (flag == 61) return CalculateSphereConstColor(1, mat.const_color1, mat.sphere_rate_color1);
+    else if (flag == 62) return CalculateSphereConstColor(2, mat.const_color2, mat.sphere_rate_color2);
+    else if (flag == 63) return CalculateSphereConstColor(3, mat.const_color3, mat.sphere_rate_color3);
 
-    else if (flag == 115) return vec4(0.0); // constant
-    else if (flag == 116) return vec4(1.0); // constant
+    else if (flag == 115) return vec4(0.0);
+    else if (flag == 116) return vec4(1.0);
 
     return vec4(0.0);
+}
+
+vec4 GetCompBlend(vec4 v, int comp_mask)
+{
+    if      (comp_mask == 10)  return v.rgba;
+    else if (comp_mask == 20)  return v.rrrr;
+    else if (comp_mask == 30)  return v.gggg;
+    else if (comp_mask == 40)  return v.bbbb;
+    else if (comp_mask == 50)  return v.aaaa;
+    else if (comp_mask == 11)  return 1.0 - v.rgba;
+    else if (comp_mask == 21)  return 1.0 - v.rrrr;
+    else if (comp_mask == 31)  return 1.0 - v.gggg;
+    else if (comp_mask == 41)  return 1.0 - v.bbbb;
+    else if (comp_mask == 51)  return 1.0 - v.aaaa;
+    return v.rgba;
+}
+
+vec4 GetComp(vec4 v, int comp_mask)
+{
+    if      (comp_mask == 10)  return v.rgba;
+    else if (comp_mask == 30)  return v.rrrr;
+    else if (comp_mask == 40)  return v.gggg;
+    else if (comp_mask == 50)  return v.bbbb;
+    else if (comp_mask == 60)  return v.aaaa;
+    else if (comp_mask == 70)  return clamp(1.0 - v.rrrr, 0.0, 1.0);
+    else if (comp_mask == 80)  return clamp(1.0 - v.gggg, 0.0, 1.0);
+    else if (comp_mask == 90)  return clamp(1.0 - v.bbbb, 0.0, 1.0);
+    else if (comp_mask == 100) return clamp(1.0 - v.aaaa, 0.0, 1.0);
+
+    return v.rgba;
+}
+
+vec4 CalculateBlend(bool enable, int src_id, int dst_id, int cof_id, int cof_map, int src_ch, int dst_ch, int cof_ch, int equation) {
+    if (!enable)
+        return vec4(0.0);
+
+    vec4 src = GetCompBlend(CalculateOutput(src_id), src_ch);
+    vec4 dst = GetCompBlend(CalculateOutput(dst_id), dst_ch);
+    vec4 cof = GetCompBlend(CalculateCofBlendOutput(cof_id, cof_map), cof_ch);
+
+    if      (equation == 0) return fma(src - dst, cof, dst);
+    else if (equation == 1) return fma(dst, cof, src);
+    else if (equation == 2) return dst * cof * src;
+    else if (equation == 3) return fma(dst, -cof, src);
+    else if (equation == 4) return dst + cof + src;
+    else if (equation == 7) return (src + dst) * cof;
+    else if (equation == 8) return (src - dst) * cof;
+
+    return src;
+}
+
+void PrecomputeBlends() {
+    bool enable_blend =      ${program.getShaderOptionBoolean('enable_blend0')};
+    int blend_src =          ${program.getShaderOptionNumber('blend0_src')};
+    int blend_dst =          ${program.getShaderOptionNumber('blend0_dst')};
+    int blend_cof =          ${program.getShaderOptionNumber('blend0_cof')};
+    int blend_cof_map =      ${program.getShaderOptionNumber('blend0_cof_map')};
+    int blend_src_ch =       ${program.getShaderOptionNumber('blend0_src_ch')};
+    int blend_dst_ch =       ${program.getShaderOptionNumber('blend0_dst_ch')};
+    int blend_cof_ch =       ${program.getShaderOptionNumber('blend0_cof_ch')};
+    int blend_indirect_map = ${program.getShaderOptionNumber('blend0_indirect_map')};
+    int blend_eq =           ${program.getShaderOptionNumber('blend0_eq')};
+    BLEND0_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
+    
+    enable_blend =       ${program.getShaderOptionBoolean('enable_blend1')};
+    blend_src =          ${program.getShaderOptionNumber('blend1_src')};
+    blend_dst =          ${program.getShaderOptionNumber('blend1_dst')};
+    blend_cof =          ${program.getShaderOptionNumber('blend1_cof')};
+    blend_cof_map =      ${program.getShaderOptionNumber('blend1_cof_map')};
+    blend_src_ch =       ${program.getShaderOptionNumber('blend1_src_ch')};
+    blend_dst_ch =       ${program.getShaderOptionNumber('blend1_dst_ch')};
+    blend_cof_ch =       ${program.getShaderOptionNumber('blend1_cof_ch')};
+    blend_indirect_map = ${program.getShaderOptionNumber('blend1_indirect_map')};
+    blend_eq =           ${program.getShaderOptionNumber('blend1_eq')};
+    BLEND1_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
+    
+    enable_blend =       ${program.getShaderOptionBoolean('enable_blend2')};
+    blend_src =          ${program.getShaderOptionNumber('blend2_src')};
+    blend_dst =          ${program.getShaderOptionNumber('blend2_dst')};
+    blend_cof =          ${program.getShaderOptionNumber('blend2_cof')};
+    blend_cof_map =      ${program.getShaderOptionNumber('blend2_cof_map')};
+    blend_src_ch =       ${program.getShaderOptionNumber('blend2_src_ch')};
+    blend_dst_ch =       ${program.getShaderOptionNumber('blend2_dst_ch')};
+    blend_cof_ch =       ${program.getShaderOptionNumber('blend2_cof_ch')};
+    blend_indirect_map = ${program.getShaderOptionNumber('blend2_indirect_map')};
+    blend_eq =           ${program.getShaderOptionNumber('blend2_eq')};
+    BLEND2_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
+    
+    enable_blend =       ${program.getShaderOptionBoolean('enable_blend3')};
+    blend_src =          ${program.getShaderOptionNumber('blend3_src')};
+    blend_dst =          ${program.getShaderOptionNumber('blend3_dst')};
+    blend_cof =          ${program.getShaderOptionNumber('blend3_cof')};
+    blend_cof_map =      ${program.getShaderOptionNumber('blend3_cof_map')};
+    blend_src_ch =       ${program.getShaderOptionNumber('blend3_src_ch')};
+    blend_dst_ch =       ${program.getShaderOptionNumber('blend3_dst_ch')};
+    blend_cof_ch =       ${program.getShaderOptionNumber('blend3_cof_ch')};
+    blend_indirect_map = ${program.getShaderOptionNumber('blend3_indirect_map')};
+    blend_eq =           ${program.getShaderOptionNumber('blend3_eq')};
+    BLEND3_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
+    
+    enable_blend =       ${program.getShaderOptionBoolean('enable_blend4')};
+    blend_src =          ${program.getShaderOptionNumber('blend4_src')};
+    blend_dst =          ${program.getShaderOptionNumber('blend4_dst')};
+    blend_cof =          ${program.getShaderOptionNumber('blend4_cof')};
+    blend_cof_map =      ${program.getShaderOptionNumber('blend4_cof_map')};
+    blend_src_ch =       ${program.getShaderOptionNumber('blend4_src_ch')};
+    blend_dst_ch =       ${program.getShaderOptionNumber('blend4_dst_ch')};
+    blend_cof_ch =       ${program.getShaderOptionNumber('blend4_cof_ch')};
+    blend_indirect_map = ${program.getShaderOptionNumber('blend4_indirect_map')};
+    blend_eq =           ${program.getShaderOptionNumber('blend4_eq')};
+    BLEND4_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
+
+    enable_blend =       ${program.getShaderOptionBoolean('enable_blend5')};
+    blend_src =          ${program.getShaderOptionNumber('blend5_src')};
+    blend_dst =          ${program.getShaderOptionNumber('blend5_dst')};
+    blend_cof =          ${program.getShaderOptionNumber('blend5_cof')};
+    blend_cof_map =      ${program.getShaderOptionNumber('blend5_cof_map')};
+    blend_src_ch =       ${program.getShaderOptionNumber('blend5_src_ch')};
+    blend_dst_ch =       ${program.getShaderOptionNumber('blend5_dst_ch')};
+    blend_cof_ch =       ${program.getShaderOptionNumber('blend5_cof_ch')};
+    blend_indirect_map = ${program.getShaderOptionNumber('blend5_indirect_map')};
+    blend_eq =           ${program.getShaderOptionNumber('blend5_eq')};
+    BLEND5_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
 }
 
 vec3 CalculateEmissionScale(vec3 emission, int scale_type, vec4 irradiance)
@@ -190,7 +422,7 @@ vec3 CalculateEmission(vec4 irradiance)
 
     if (${program.getShaderOptionBoolean('enable_emission')} == true)
     {
-        emission = ${program.genOutput('o_emission')}${program.genOutputCompMask('emission_component')}.rgb;
+        emission = GetComp(${program.genOutput('o_emission')}, ${program.getShaderOptionNumber('emission_component')}).rgb;
 
         if (${program.getShaderOptionNumber('vtxcolor_type')} == 2) // VTX_COLOR_TYPE_EMISSION
             emission *= v_VtxColor.rgb;
@@ -302,28 +534,16 @@ vec2 GetScreenCoordinates()
     return screenCoord;
 }
 
-vec4 BLEND0_OUTPUT;
-vec4 BLEND1_OUTPUT;
-vec4 BLEND2_OUTPUT;
-vec4 BLEND3_OUTPUT;
-vec4 BLEND4_OUTPUT;
-vec4 BLEND5_OUTPUT;
-
 void main() {
-    BLEND0_OUTPUT = ${program.genBlend(0)};
-    BLEND1_OUTPUT = ${program.genBlend(1)};
-    BLEND2_OUTPUT = ${program.genBlend(2)};
-    BLEND3_OUTPUT = ${program.genBlend(3)};
-    BLEND4_OUTPUT = ${program.genBlend(4)};
-    BLEND5_OUTPUT = ${program.genBlend(5)};
-    
+    PrecomputeBlends();
+
     vec4 base_color           = ${program.genOutput('o_base_color')};
     vec2 normal_map           = ${program.genOutput('o_normal')}.rg;
-    float metalness   = ${program.genOutput('o_metalness')}${program.genOutputCompMask('metalness_component')}.r;
-    float roughness   = ${program.genOutput('o_roughness')}${program.genOutputCompMask('roughness_component')}.r;
+    float metalness   = GetComp(${program.genOutput('o_metalness')}, ${program.getShaderOptionNumber('metalness_component')}).r;
+    float roughness   = GetComp(${program.genOutput('o_roughness')}, ${program.getShaderOptionNumber('roughness_component')}).r;
     vec4 sss                  = ${program.genOutput('o_sss')};
     vec4 ao                   = ${program.genOutput('o_ao')};
-    float alpha      = ${program.genOutput('o_alpha')}${program.genOutputCompMask('alpha_component')}.r;
+    float alpha      = GetComp(${program.genOutput('o_alpha')}, ${program.getShaderOptionNumber('alpha_component')}).r;
     bool has_transparent_tex = ${program.getShaderOptionBoolean('enable_transparent')};
 
     vec3 eye_to_pos = vec3(v_ViewPos.zw, v_LightColorVPosZ.w);
@@ -358,8 +578,8 @@ void main() {
 
     // TODO: Dirt stain
 
-    float refract_eta = ${program.genOutput('o_refract_eta')}${program.genOutputCompMask('refract_eta_component')}.r;
-    float refract_rate = ${program.genOutput('o_refract_rate')}${program.genOutputCompMask('refract_rate_component')}.r;
+    float refract_eta = GetComp(${program.genOutput('o_refract_eta')}, ${program.getShaderOptionNumber('refract_eta_component')}).r;
+    float refract_rate = GetComp(${program.genOutput('o_refract_rate')}, ${program.getShaderOptionNumber('refract_rate_component')}).r;
 
     vec3 refract_view =  refract_eta * -N_I * view_normal + dir * mat.refract_thickness; 
 
