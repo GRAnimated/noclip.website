@@ -5,6 +5,9 @@ layout(location = 1) in vec4 _c0;
 layout(location = 2) in vec2 _u0;
 layout(location = 3) in vec4 _n0;
 layout(location = 4) in vec4 _t0;
+layout(location = 5) in vec2 _u1;
+layout(location = 6) in vec2 _u2;
+layout(location = 7) in vec2 _u3;
 
 out vec3 v_Normal;
 out float v_Depth;
@@ -41,7 +44,7 @@ void main() {
     // v_IrradianceVertex.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
     
     // TEMP: using vertex color as irradiance
-    v_IrradianceVertex = _c0;
+    // v_IrradianceVertex = _c0;
 
     // Sphere mapping coordinates
     vec3 view_normal = normalize(multMtx34Vec3(mdlEnvView.cView, v_Normal));
@@ -50,6 +53,9 @@ void main() {
     v_PerspDiv.xy = gl_Position.xy / gl_Position.w;
 
     v_TexCoord0 = _u0;
+    v_TexCoord1 = _u1;
+    v_TexCoord2 = _u2;
+    v_TexCoord3 = _u3;
     v_VtxColor = _c0;
     v_Normal = _n0.xyz;
     v_Tangents = _t0;

@@ -293,6 +293,14 @@ vec4 GetComp(vec4 v, int comp_mask)
     return v.rgba;
 }
 
+float BlendCompareComponent(float src, float dst, float cof)
+{
+    float cmp = (src < 0.5) ? 0.0 : 1.0;
+    float n = -2.0 * src + 2.0;
+    float func = 2.0 * src * dst * cof + 2.0 * src - src * cof;
+    return func + cmp * (-func - dst * cof * (-n) + cmp);
+}
+
 vec4 CalculateBlend(bool enable, int src_id, int dst_id, int cof_id, int cof_map, int src_ch, int dst_ch, int cof_ch, int equation) {
     if (!enable)
         return vec4(0.0);
@@ -304,10 +312,19 @@ vec4 CalculateBlend(bool enable, int src_id, int dst_id, int cof_id, int cof_map
     if      (equation == 0) return fma(src - dst, cof, dst);
     else if (equation == 1) return fma(dst, cof, src);
     else if (equation == 2) return dst * cof * src;
-    else if (equation == 3) return fma(dst, -cof, src);
-    else if (equation == 4) return dst + cof + src;
-    else if (equation == 7) return (src + dst) * cof;
-    else if (equation == 8) return (src - dst) * cof;
+    else if (equation == 3) return fma(dst, 0.0 - cof, src); 
+    else if (equation == 4) return dst + cof + src; 
+    else if (equation == 5) return fma(dst * cof, 0.0 - src, dst * cof) + src;
+    else if (equation == 6) //Compare func 
+    {
+        src.x = BlendCompareComponent(src.x, dst.x, cof.x);
+        src.y = BlendCompareComponent(src.y, dst.y, cof.y);
+        src.z = BlendCompareComponent(src.z, dst.z, cof.z);
+        src.w = BlendCompareComponent(src.w, dst.w, cof.w);
+        return src;
+    }
+    else if (equation == 7) return (src + dst) * cof; 
+    else if (equation == 8) return (src - dst) * cof; 
 
     return src;
 }
@@ -321,7 +338,6 @@ void PrecomputeBlends() {
     int blend_src_ch =       ${program.getShaderOptionNumber('blend0_src_ch')};
     int blend_dst_ch =       ${program.getShaderOptionNumber('blend0_dst_ch')};
     int blend_cof_ch =       ${program.getShaderOptionNumber('blend0_cof_ch')};
-    int blend_indirect_map = ${program.getShaderOptionNumber('blend0_indirect_map')};
     int blend_eq =           ${program.getShaderOptionNumber('blend0_eq')};
     BLEND0_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
     
@@ -333,7 +349,6 @@ void PrecomputeBlends() {
     blend_src_ch =       ${program.getShaderOptionNumber('blend1_src_ch')};
     blend_dst_ch =       ${program.getShaderOptionNumber('blend1_dst_ch')};
     blend_cof_ch =       ${program.getShaderOptionNumber('blend1_cof_ch')};
-    blend_indirect_map = ${program.getShaderOptionNumber('blend1_indirect_map')};
     blend_eq =           ${program.getShaderOptionNumber('blend1_eq')};
     BLEND1_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
     
@@ -345,7 +360,6 @@ void PrecomputeBlends() {
     blend_src_ch =       ${program.getShaderOptionNumber('blend2_src_ch')};
     blend_dst_ch =       ${program.getShaderOptionNumber('blend2_dst_ch')};
     blend_cof_ch =       ${program.getShaderOptionNumber('blend2_cof_ch')};
-    blend_indirect_map = ${program.getShaderOptionNumber('blend2_indirect_map')};
     blend_eq =           ${program.getShaderOptionNumber('blend2_eq')};
     BLEND2_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
     
@@ -357,7 +371,6 @@ void PrecomputeBlends() {
     blend_src_ch =       ${program.getShaderOptionNumber('blend3_src_ch')};
     blend_dst_ch =       ${program.getShaderOptionNumber('blend3_dst_ch')};
     blend_cof_ch =       ${program.getShaderOptionNumber('blend3_cof_ch')};
-    blend_indirect_map = ${program.getShaderOptionNumber('blend3_indirect_map')};
     blend_eq =           ${program.getShaderOptionNumber('blend3_eq')};
     BLEND3_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
     
@@ -369,7 +382,6 @@ void PrecomputeBlends() {
     blend_src_ch =       ${program.getShaderOptionNumber('blend4_src_ch')};
     blend_dst_ch =       ${program.getShaderOptionNumber('blend4_dst_ch')};
     blend_cof_ch =       ${program.getShaderOptionNumber('blend4_cof_ch')};
-    blend_indirect_map = ${program.getShaderOptionNumber('blend4_indirect_map')};
     blend_eq =           ${program.getShaderOptionNumber('blend4_eq')};
     BLEND4_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
 
@@ -381,7 +393,6 @@ void PrecomputeBlends() {
     blend_src_ch =       ${program.getShaderOptionNumber('blend5_src_ch')};
     blend_dst_ch =       ${program.getShaderOptionNumber('blend5_dst_ch')};
     blend_cof_ch =       ${program.getShaderOptionNumber('blend5_cof_ch')};
-    blend_indirect_map = ${program.getShaderOptionNumber('blend5_indirect_map')};
     blend_eq =           ${program.getShaderOptionNumber('blend5_eq')};
     BLEND5_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
 }
@@ -467,6 +478,7 @@ Light SetupLight(vec3 N, vec3 view_pos)
 vec4 CalculateDiffuseIrradianceLight(Light light)
 {
     vec4 irradiance = vec4(0.0, 0.0, 0.0, 1.0);
+
     //Z seems flipped
     vec3 dir = vec3(light.N.x, light.N.y, -light.N.z);
 
@@ -494,18 +506,15 @@ vec4 CalculateDiffuseIrradianceLight(Light light)
             irradiance.rgba += sphere_light.rgba * mdlEnvView.Exposure.y;
         }
         */
-
-        // TEMP
-        irradiance.rgb = vec3(0.05);
     }
     else //calculated per vertex
     {
         //By vertex color
-        // if (vtxcolor_type == VTX_COLOR_TYPE_IRRADIANCE) {
-        irradiance.rgba = v_VtxColor;
-        // } else { //Calculated in vertex shader
-        //     irradiance.rgba = fIrradianceVertex.rgba;
-        // }
+        if (${program.getShaderOptionNumber('vtxcolor_type')} == 1) { // VTX_COLOR_TYPE_IRRADIANCE
+            irradiance.rgba = v_VtxColor;
+        } else { //Calculated in vertex shader
+            irradiance.rgba = v_IrradianceVertex.rgba;
+        }
     }
     return irradiance;
 }
@@ -611,7 +620,24 @@ void main() {
         specularTerm += spec_intensity;
     }
 
-    // TODO: Cubemap
+    // TODO: finish cubemap
+    float spec = metalness * 0.5 + 0.5;
+    //use material light cubemap
+    if (${program.getShaderOptionBoolean('enable_material_light')} == true)
+    {
+        const float MAX_LOD = 5.0;
+        // vec4 spec_cubemap = DecodeCubemap(cTextureMaterialLightCube, light.R, roughness * MAX_LOD);
+        // TEMP: no cubemap
+        vec4 spec_cubemap = vec4(0.5, 0.5, 0.5, 1.0);
+        specularTerm.rgb += spec * (spec_cubemap.rgb * mdlEnvView.uIrradianceScale) * brdf;
+    }
+    else
+    {
+        const float MAX_LOD = 5.0;
+        // vec4 spec_cubemap = DecodeCubemap(cTexCubeMapRoughness, light.R, roughness * MAX_LOD);
+        vec4 spec_cubemap = vec4(0.5, 0.5, 0.5, 1.0);
+        specularTerm.rgb += spec * (spec_cubemap.rgb * mdlEnvView.uIrradianceScale) * brdf;
+    }
 
     // TODO: enable_structural_color
 

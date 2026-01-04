@@ -183,11 +183,6 @@ class MaterialParams {
     public stain_rate = 1.0;
 }
 
-class HDRTranslateData {
-    public power = 2.2;
-    public range = 1.0;
-}
-
 class ModelAdditionalInfo {
     public model_alpha_mask = 1.0;
     public normal_axis_x_scale = 1.0;
@@ -204,7 +199,10 @@ export class AglProgram extends DeviceProgram {
     public static _u0: number = 2;
     public static _n0: number = 3;
     public static _t0: number = 4;
-    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0' ];
+    public static _u1: number = 5;
+    public static _u2: number = 6;
+    public static _u3: number = 7;
+    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3' ];
 
     public static ub_ShapeParams = 0;
     public static ub_MdlEnvView = 1; // and ub_HDRTranslate
@@ -422,8 +420,17 @@ uniform sampler2D u_Texture7;
     }
 
     public genUniform(num: number): string {
+        const shaderSamplerName = `_u${num}`;
+        
+        let textureUnit: number;
+        try {
+            textureUnit = this.lookupSamplerIndex(shaderSamplerName);
+        } catch(e) {
+            return `vec4(1.0)`; // no texture bound
+        }
+        
         return `
-            CalculateUniform(u_Texture${num},
+            CalculateUniform(u_Texture${textureUnit},
             ${this.getShaderOptionNumber(`uniform${num}_fuv_selector`)},
             ${this.getShaderOptionBoolean(`enable_uniform${num}`)},
             mat.uniform${num}_mul_color,
@@ -528,7 +535,6 @@ class FMATInstance {
     private gfxProgram: GfxProgram;
     private megaStateFlags: Partial<GfxMegaStateDescriptor>;
     private materialParams = new MaterialParams();
-    private hdrData = new HDRTranslateData();
 
     constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, public fmat: FMAT) {
         this.program = new AglProgram(fmat);
