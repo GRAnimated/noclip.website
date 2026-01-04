@@ -53,15 +53,13 @@ void main() {
     {
         if (${program.getShaderOptionBoolean('enable_material_light')}) // use material light cubemap
         {
-            const float MAX_LOD = 5.0;
-            vec4 irradiance_cubemap = DecodeCubemap(u_CubemapTexture0, v_Normal, MAX_LOD);
+            vec4 irradiance_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, v_Normal);
             v_IrradianceVertex = irradiance_cubemap *= mdlEnvView.uIrradianceScale;
         }
         else //use material roughness cubemap
         {
             // TODO: and TEMP: Roughness cubemap
-            const float MAX_LOD = 5.0;
-            vec4 irradiance_cubemap = DecodeCubemap(u_CubemapTexture0, v_Normal, MAX_LOD);
+            vec4 irradiance_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, v_Normal);
             v_IrradianceVertex.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
         }
     }

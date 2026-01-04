@@ -1,4 +1,3 @@
-
 use wasm_bindgen::prelude::wasm_bindgen;
 use crate::util;
 
@@ -13,6 +12,7 @@ pub enum CompressionType {
     Bc3,
     Bc4,
     Bc5,
+    Rgba8,
 }
 
 const fn get_format_bytes_per_block(channel_format: CompressionType) -> usize {
@@ -20,6 +20,7 @@ const fn get_format_bytes_per_block(channel_format: CompressionType) -> usize {
     match channel_format {
         Bc1 | Bc4 => 8,
         Bc2 | Bc3 | Bc5 => 16,
+        Rgba8 => 4,
     }
 }
 
@@ -27,6 +28,7 @@ const fn get_format_block_width(channel_format: CompressionType) -> usize {
     use CompressionType::*;
     match channel_format {
         Bc1 | Bc2 | Bc3 | Bc4 | Bc5 => 4,
+        Rgba8 => 1,
     }
 }
 
@@ -34,6 +36,7 @@ const fn get_format_block_height(channel_format: CompressionType) -> usize {
     use CompressionType::*;
     match channel_format {
         Bc1 | Bc2 | Bc3 | Bc4 | Bc5 => 4,
+        Rgba8 => 1,
     }
 }
 
@@ -77,7 +80,10 @@ pub fn tegra_deswizzle(src: &[u8], compression_type: CompressionType, w: usize, 
         for x in 0..width_in_blocks {
             let src_offs = get_addr_block_linear(x, y, width_in_blocks, bpp, block_height, 0);
             let dst_offs = ((y * width_in_blocks) + x) * bpp;
-            dst[dst_offs..dst_offs + bpp].copy_from_slice(&src[src_offs..src_offs + bpp]);
+            
+            if src_offs + bpp <= src.len() && dst_offs + bpp <= dst.len() {
+                dst[dst_offs..dst_offs + bpp].copy_from_slice(&src[src_offs..src_offs + bpp]);
+            }
         }
     }
 

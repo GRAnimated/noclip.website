@@ -89,30 +89,9 @@ export class BRTITextureHolder extends TextureHolder {
             const blockHeightLog2 = textureEntry.blockHeightLog2;
             deswizzle({ buffer, width, height, channelFormat, blockHeightLog2 }).then((deswizzled) => {
                 const rgbaTexture = decompress({ ...textureEntry, width, height, depth }, deswizzled);
-
-                const decodedWidth  = Math.ceil(width / 4) * 4;
-                const decodedHeight = Math.ceil(height / 4) * 4;
-
                 let rgbaPixels = rgbaTexture.pixels;
-
-                // Small mipmaps like 1x1 may be decoded to a larger size (4x4), so we need to crop them.
-                if (decodedWidth !== width || decodedHeight !== height) {
-                    const cropped = new Uint8Array(width * height * 4);
-
-                    for (let y = 0; y < height; y++) {
-                        const srcRow = y * decodedWidth * 4;
-                        const dstRow = y * width * 4;
-                        cropped.set(
-                            rgbaPixels.subarray(srcRow, srcRow + width * 4),
-                            dstRow
-                        );
-                    }
-
-                    rgbaPixels = cropped;
-                    rgbaTexture.pixels = cropped;
-                    rgbaTexture.width = width;
-                    rgbaTexture.height = height;
-                }
+                rgbaTexture.width = width;
+                rgbaTexture.height = height;
 
                 device.uploadTextureData(gfxTexture, mipLevel, [rgbaPixels]);
 
@@ -716,16 +695,11 @@ class FMATInstance {
 
         this.gfxProgram = cache.createProgram(this.program);
 
-        // Render flags.
-        if (this.fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
-            return;
-        }
-
         const isTranslucent = this.program.isTranslucent;
         if (fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
             this.megaStateFlags = {
                 cullMode:       GfxCullMode.None,
-                depthCompare:   reverseDepthForCompareMode(GfxCompareMode.LessEqual),
+                depthCompare:   GfxCompareMode.Always,
                 depthWrite:     false,
             };
         } else {
@@ -751,27 +725,7 @@ class FMATInstance {
         renderInst.sortKey = makeSortKey(materialLayer, 0);
         renderInst.setSamplerBindingsFromTextureMappings(this.textureMapping);
         renderInst.setGfxProgram(this.gfxProgram);
-        if (this.fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
-            renderInst.setMegaStateFlags({
-                attachmentsState: [
-                    {
-                        channelWriteMask: GfxChannelWriteMask.AllChannels,
-                        rgbBlendState: {
-                            blendMode: GfxBlendMode.Add,
-                            blendSrcFactor: GfxBlendFactor.SrcAlpha,
-                            blendDstFactor: GfxBlendFactor.OneMinusSrcAlpha,
-                        },
-                        alphaBlendState: {
-                            blendMode: GfxBlendMode.Add,
-                            blendSrcFactor: GfxBlendFactor.One,
-                            blendDstFactor: GfxBlendFactor.OneMinusSrcAlpha,
-                        },
-                    }
-                ],
-            });
-        } else {
-            renderInst.setMegaStateFlags(this.megaStateFlags);
-        }
+        renderInst.setMegaStateFlags(this.megaStateFlags);
     }
 
     public destroy(device: GfxDevice): void {
@@ -1241,7 +1195,7 @@ class FSHPInstance {
     }
 
     private fillMdlEnvView(d: Float32Array, offs: number, viewerInput: Viewer.ViewerRenderInput, modelMatrix: mat4): number {
-        d[offs++] = 0.5;  // HDRTranslate_uHDRPower
+        d[offs++] = 1.0;  // HDRTranslate_uHDRPower
         d[offs++] = 2.2;  // HDRTranslate_uDynamicRange
         offs += 2;          // padding
         
@@ -1415,8 +1369,6 @@ export class FMDLRenderer {
 export class SkyRenderer extends FMDLRenderer {
     constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, fmdlData: FMDLData) {
         super(device, cache, textureHolder, fmdlData);
-
-        this.modelMatrix[5] = 200.0 * this.modelMatrix[5];
     }
 
     public override prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
@@ -1424,9 +1376,6 @@ export class SkyRenderer extends FMDLRenderer {
             return;
 
         mat4.identity(this.modelMatrix);
-        this.modelMatrix[12] = viewerInput.camera.worldMatrix[12];
-        this.modelMatrix[13] = viewerInput.camera.worldMatrix[13] - 300000;
-        this.modelMatrix[14] = viewerInput.camera.worldMatrix[14];
 
         const template = renderInstManager.pushTemplate();
         template.setBindingLayouts(bindingLayouts);
@@ -1440,8 +1389,10 @@ export class SkyRenderer extends FMDLRenderer {
 
 export class BasicFRESRenderer {
     public renderHelper: GfxRenderHelper;
+    private renderInstListSky = new GfxRenderInstList();
     private renderInstListMain = new GfxRenderInstList();
     public fmdlRenderers: FMDLRenderer[] = [];
+    public skyRenderers: SkyRenderer[] = [];
 
     constructor(device: GfxDevice, public textureHolder: BRTITextureHolder) {
         this.renderHelper = new GfxRenderHelper(device);
@@ -1449,15 +1400,22 @@ export class BasicFRESRenderer {
 
     public createPanels(): UI.Panel[] {
         const layersPanel = new UI.LayerPanel();
-        layersPanel.setLayers(this.fmdlRenderers);
+        layersPanel.setLayers([...this.skyRenderers, ...this.fmdlRenderers]);
         return [layersPanel];
     }
 
     private prepareToRender(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): void {
         const renderInstManager = this.renderHelper.renderInstManager;
 
-        this.renderHelper.renderInstManager.setCurrentList(this.renderInstListMain);
+        // Sky
+        this.renderHelper.renderInstManager.setCurrentList(this.renderInstListSky);
+        this.renderHelper.pushTemplateRenderInst();
+        for (let i = 0; i < this.skyRenderers.length; i++)
+            this.skyRenderers[i].prepareToRender(device, renderInstManager, viewerInput);
+        this.renderHelper.renderInstManager.popTemplate();
 
+        // Main scene
+        this.renderHelper.renderInstManager.setCurrentList(this.renderInstListMain);
         this.renderHelper.pushTemplateRenderInst();
         for (let i = 0; i < this.fmdlRenderers.length; i++)
             this.fmdlRenderers[i].prepareToRender(device, renderInstManager, viewerInput);
@@ -1476,6 +1434,20 @@ export class BasicFRESRenderer {
 
         const mainColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Main Color');
         const mainDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Main Depth');
+
+        const camera = viewerInput.camera;
+        camera.setClipPlanes(10, 1000000);
+        
+        // Sky first
+        builder.pushPass((pass) => {
+            pass.setDebugName('Sky');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
+            pass.exec((passRenderer) => {
+                this.renderInstListSky.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+        
         builder.pushPass((pass) => {
             pass.setDebugName('Main');
             pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
@@ -1484,16 +1456,20 @@ export class BasicFRESRenderer {
                 this.renderInstListMain.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
             });
         });
+        
         this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, mainColorTargetID);
         builder.resolveRenderTargetToExternalTexture(mainColorTargetID, viewerInput.onscreenTexture);
 
         this.prepareToRender(device, viewerInput);
         this.renderHelper.renderGraph.execute(builder);
+        this.renderInstListSky.reset();
         this.renderInstListMain.reset();
     }
 
     public destroy(device: GfxDevice): void {
         this.renderHelper.destroy();
+        for (let i = 0; i < this.skyRenderers.length; i++)
+            this.skyRenderers[i].destroy(device);
         for (let i = 0; i < this.fmdlRenderers.length; i++)
             this.fmdlRenderers[i].destroy(device);
     }

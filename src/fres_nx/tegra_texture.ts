@@ -123,6 +123,7 @@ export async function deswizzle(swizzledSurface: SwizzledSurface): Promise<Uint8
         channelFormat === ChannelFormat.Bc3 ? rust.CompressionType.Bc3 :
         channelFormat === ChannelFormat.Bc4 ? rust.CompressionType.Bc4 :
         channelFormat === ChannelFormat.Bc5 ? rust.CompressionType.Bc5 :
+        channelFormat === ChannelFormat.R8_G8_B8_A8 ? rust.CompressionType.Rgba8 :
         undefined!;
     return rust.tegra_deswizzle(buffer.createTypedArray(Uint8Array), compressionType, width, height, blockHeightLog2) as Uint8Array<ArrayBuffer>;
 }

@@ -207,7 +207,7 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
             
             console.log('Stage Design:', stageDesignParam);
 
-            const presetName: string = stageDesignParam ? String(stageDesignParam.PresetName) : "";
+            const presetName: string = String(stageDesignParam!.PresetName) === "Default" ? `CubeMap${stageName}` : String(stageDesignParam!.PresetName);
 
             const graphicsPresetSARC = await resourceSystem.fetchData(device, dataFetcher, `SystemData/GraphicsPreset`);
             console.log('Graphics Preset:', graphicsPresetSARC);
@@ -254,7 +254,7 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
                     if (skyFmdlData !== null) {
                         const skyRenderer = new SkyRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData);
                         mat4.copy(skyRenderer.modelMatrix, placement);
-                        sceneRenderer.fmdlRenderers.push(skyRenderer);
+                        sceneRenderer.skyRenderers.push(skyRenderer);
                     }
                 }
             }

@@ -489,15 +489,13 @@ vec4 CalculateDiffuseIrradianceLight(Light light)
     {
         if (${program.getShaderOptionBoolean('enable_material_light')} == true)
         {
-            const float MAX_LOD = 5.0;
-            vec4 irradiance_cubemap = DecodeCubemap(u_CubemapTexture0, dir, MAX_LOD);
+            vec4 irradiance_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, dir);
             irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
         }
         else //use material roughness cubemap
         {
             // TODO: and TEMP: Roughness cubemap
-            const float MAX_LOD = 5.0;
-            vec4 irradiance_cubemap = DecodeCubemap(u_CubemapTexture0, dir, MAX_LOD);
+            vec4 irradiance_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, dir);
             irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
         }
         if (${program.getShaderOptionBoolean('enable_material_sphere_light')} == true)
@@ -625,15 +623,13 @@ void main() {
     //use material light cubemap
     if (${program.getShaderOptionBoolean('enable_material_light')} == true)
     {
-        const float MAX_LOD = 5.0;
-        vec4 spec_cubemap = DecodeCubemap(u_CubemapTexture0, light.R, roughness * MAX_LOD);
+        vec4 spec_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, light.R);
         specularTerm.rgb += spec * (spec_cubemap.rgb * mdlEnvView.uIrradianceScale) * brdf;
     }
     else
     {
         // TODO: and TEMP: Roughness cubemap
-        const float MAX_LOD = 5.0;
-        vec4 spec_cubemap = DecodeCubemap(u_CubemapTexture0, light.R, roughness * MAX_LOD);
+        vec4 spec_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, light.R);
         specularTerm.rgb += spec * (spec_cubemap.rgb * mdlEnvView.uIrradianceScale) * brdf;
     }
 
@@ -760,7 +756,7 @@ void main() {
 
     gl_FragColor = vec4(light_buf.rgb, light_buf.a);
 
-    gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(1.0 / 2.2));
+    gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(mdlEnvView.HDRTranslate_uHDRPower / mdlEnvView.HDRTranslate_uDynamicRange));
 }
 `;
 }
