@@ -1,4 +1,4 @@
-export function generateSkyVertexShader(): string {
+export function generateRenderSkyVertex(): string {
     return `
 layout(location = 0) in vec3 _p0;
 layout(location = 1) in vec4 _c0;

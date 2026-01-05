@@ -6,7 +6,7 @@ import { DataFetcher } from '../DataFetcher.js';
 import * as SARC from '../fres_nx/sarc.js';
 import * as BFRES from '../fres_nx/bfres.js';
 import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
-import { BRTITextureHolder, BasicFRESRenderer, FMDLRenderer, FMDLData, SkyRenderer } from './Render.js';
+import { BRTITextureHolder, BasicFRESRenderer, FMDLRenderer, FMDLData, SkyRenderer, latLonToDirection } from './Render.js';
 import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { assert, assertExists } from '../util.js';
 import { mat4 } from 'gl-matrix';
@@ -140,8 +140,27 @@ type GraphicsAreaParamEntry = {
 type GraphicsArea = {
     GraphicsAreaParamArray: GraphicsAreaParamEntry[];
 };
-type GraphicsPreset = {
+export type GraphicsPreset = {
+    DirectionalLight: {
+        Color: { A: number; B: number; G: number; R: number };
+        DirectionParam: { X: number; Y: number; };
+    }
     Sky: { Name: string };
+    Fog: {
+        Color: { R: number; G: number; B: number; A: number };
+        Slope: number;
+        Start: number;
+        Max: number;
+        IsEnable: boolean;
+    };
+    YFog: {
+        Color: { R: number; G: number; B: number; A: number };
+        Slope: number;
+        Start: number;
+        Max: number;
+        DistanceSlopeScale: number;
+        IsEnable: boolean;
+    };
 }
 
 function calcModelMtxFromTRSVectors(dst: mat4, tv: Vector, rv: Vector, sv: Vector): void {
@@ -162,7 +181,9 @@ export class OdysseyRenderer extends BasicFRESRenderer {
     }
 }
 
-class OdysseySceneDesc implements Viewer.SceneDesc {
+export class OdysseySceneDesc implements Viewer.SceneDesc {
+    public static graphicsPreset: GraphicsPreset | null = null;
+
     constructor(public id: string, public name: string = id) {
     }
 
@@ -224,6 +245,10 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
 
             console.log(graphicsPreset);
 
+            if (graphicsPreset) {
+                OdysseySceneDesc.graphicsPreset = graphicsPreset;
+            }
+
             if (entry.ObjectList !== undefined)
                 for (let i = 0; i < entry.ObjectList.length; i++)
                     resourceSystem.fetchData(device, dataFetcher, `ObjectData/${entry.ObjectList[i].UnitConfigName}`);
@@ -234,6 +259,12 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
                 resourceSystem.fetchData(device, dataFetcher, `ObjectData/${graphicsPreset.Sky.Name}`);
             }
             resourceSystem.fetchData(device, dataFetcher, `ObjectData/CubeMap${stageName}`);
+
+            const preset = OdysseySceneDesc.graphicsPreset!;
+            const color = preset.DirectionalLight.Color;
+            const lightColor = { r: color.R, g: color.G, b: color.B, a: color.A * 255.0 };
+
+            resourceSystem.textureHolder.addLUTTexture(device, 16, lightColor);
 
             await resourceSystem.waitForLoad();
 
@@ -254,6 +285,11 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
                     if (skyFmdlData !== null) {
                         const skyRenderer = new SkyRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData);
                         mat4.copy(skyRenderer.modelMatrix, placement);
+                        
+                        const preset = OdysseySceneDesc.graphicsPreset!;
+                        const dir = latLonToDirection(preset.DirectionalLight.DirectionParam.Y, preset.DirectionalLight.DirectionParam.X);
+                        mat4.rotateY(skyRenderer.modelMatrix, skyRenderer.modelMatrix, (180 * MathConstants.DEG_TO_RAD) + dir.z);
+                        
                         sceneRenderer.skyRenderers.push(skyRenderer);
                     }
                 }
@@ -277,7 +313,6 @@ class OdysseySceneDesc implements Viewer.SceneDesc {
     }
 }
 
-// Splatoon Models
 const name = "Super Mario Odyssey";
 const id = "smo";
 const sceneDescs = [

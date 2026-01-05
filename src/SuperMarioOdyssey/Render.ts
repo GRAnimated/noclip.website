@@ -3,7 +3,7 @@ import * as UI from '../ui.js';
 import * as Viewer from '../viewer.js';
 import { TextureHolder, TextureMapping } from '../TextureHolder.js';
 
-import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode, GfxCullMode, GfxCompareMode, GfxInputLayout, GfxBuffer, GfxBufferUsage, GfxFormat, GfxVertexAttributeDescriptor, GfxVertexBufferFrequency, GfxVertexBufferDescriptor, GfxBindingLayoutDescriptor, GfxBlendMode, GfxBlendFactor, GfxProgram, GfxMegaStateDescriptor, GfxIndexBufferDescriptor, GfxInputLayoutBufferDescriptor, makeTextureDescriptor2D, GfxBufferFrequencyHint, GfxChannelWriteMask, GfxTextureDimension, GfxTextureUsage, GfxSamplerFormatKind } from '../gfx/platform/GfxPlatform.js';
+import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode, GfxCullMode, GfxCompareMode, GfxInputLayout, GfxBuffer, GfxBufferUsage, GfxFormat, GfxVertexAttributeDescriptor, GfxVertexBufferFrequency, GfxVertexBufferDescriptor, GfxBindingLayoutDescriptor, GfxBlendMode, GfxBlendFactor, GfxProgram, GfxMegaStateDescriptor, GfxIndexBufferDescriptor, GfxInputLayoutBufferDescriptor, makeTextureDescriptor2D, GfxBufferFrequencyHint, GfxChannelWriteMask, GfxTextureDimension, GfxTextureUsage, GfxSamplerFormatKind, GfxTexture } from '../gfx/platform/GfxPlatform.js';
 
 import * as BNTX from '../fres_nx/bntx.js';
 import { surfaceToCanvas } from '../Common/bc_texture.js';
@@ -13,7 +13,7 @@ import { GfxRenderInst, makeSortKey, GfxRendererLayer, setSortKeyDepth, GfxRende
 import { TextureAddressMode, FilterMode, IndexFormat, AttributeFormat, getChannelFormat, getTypeFormat } from '../fres_nx/nngfx_enum.js';
 import { nArray, assert, assertExists } from '../util.js';
 import { fillMatrix4x4, fillMatrix4x3 } from '../gfx/helpers/UniformBufferHelpers.js';
-import { mat4, vec2, vec3, vec4 } from "gl-matrix";
+import { mat3, mat4, vec2, vec3, vec4 } from "gl-matrix";
 import { computeViewMatrix, computeViewSpaceDepthFromWorldSpaceAABB } from '../Camera.js';
 import { AABB } from '../Geometry.js';
 import { reverseDepthForCompareMode } from '../gfx/helpers/ReversedDepthHelpers.js';
@@ -26,11 +26,14 @@ import { GfxrAttachmentSlot } from '../gfx/render/GfxRenderGraph.js';
 import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { GfxShaderLibrary } from '../gfx/helpers/GfxShaderLibrary.js';
 import { createBufferFromData, createBufferFromSlice } from '../gfx/helpers/BufferHelpers.js';
-import { generateFragmentShader } from './Fragment.js';
-import { generateSkyFragmentShader } from './SkyFragment.js';
-import { generateVertexShader } from './Vertex.js';
-import { generateSkyVertexShader } from './SkyVertex.js';
-import { generateShaderUtil } from './ShaderUtil.js';
+import { generateRenderMaterialFragment } from './Shaders/alRenderMaterial_Frag.js';
+import { generateRenderMaterialVertex } from './Shaders/alRenderMaterial_Vertex.js';
+import { generateRenderSkyFragment } from './Shaders/alRenderSky_Frag.js';
+import { generateRenderSkyVertex } from './Shaders/alRenderSky_Vertex.js';
+import { generateShaderUtil } from './Shaders/ShaderUtil.js';
+import { OdysseySceneDesc, GraphicsPreset } from './Scenes.js';
+import { convertToCanvasData } from '../gfx/helpers/TextureConversionHelpers.js';
+import { MathConstants } from '../MathHelpers.js';
 
 export class BRTITextureHolder extends TextureHolder {
     public addFRESTextures(device: GfxDevice, fres: FRES): void {
@@ -183,6 +186,70 @@ export class BRTITextureHolder extends TextureHolder {
         this.viewerTextures.push(viewerTexture);
         this.textureNames.push(textureEntry.name);
     }
+
+    public addLUTTexture(device: GfxDevice, width: number, color: { r: number; g: number; b: number; a: number }): void {
+        const data = new Float32Array(width * 4);
+        for (let i = 0; i < width; i++) {
+            const o = i * 4;
+            data[o + 0] = color.r / 255.0;
+            data[o + 1] = color.g / 255.0;
+            data[o + 2] = color.b / 255.0;
+            data[o + 3] = color.a / 255.0;
+        }
+
+        const texture = device.createTexture({
+            dimension: GfxTextureDimension.n2D,
+            pixelFormat: GfxFormat.F32_RGBA,
+            width: width,
+            height: 1,
+            depthOrArrayLayers: 1,
+            numLevels: 1,
+            usage: GfxTextureUsage.Sampled,
+        });
+
+        device.uploadTextureData(texture, 0, [data]);
+
+        // draw the real canvas first
+        const name = `LUT`;
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = 1;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            const imageData = ctx.createImageData(width, 1);
+            for (let i = 0; i < width; i++) {
+                imageData.data[i * 4 + 0] = color.r;
+                imageData.data[i * 4 + 1] = color.g;
+                imageData.data[i * 4 + 2] = color.b;
+                imageData.data[i * 4 + 3] = Math.round(color.a * 255);
+            }
+            ctx.putImageData(imageData, 0, 0);
+            const debugData = ctx.getImageData(0, 0, 1, 1);
+        } else {
+            throw "whoops";
+        }
+
+        // and then upscale it so you can actually see it
+        const upscaleWidth = 256;
+        const upscaleHeight = 16;
+        const upscaleCanvas = document.createElement('canvas');
+        upscaleCanvas.width = upscaleWidth;
+        upscaleCanvas.height = upscaleHeight;
+        const upscaleCtx = upscaleCanvas.getContext('2d');
+        if (upscaleCtx && ctx) {
+            upscaleCtx.imageSmoothingEnabled = false;
+            upscaleCtx.drawImage(canvas, 0, 0, width, 1, 0, 0, upscaleWidth, upscaleHeight);
+        } else {
+            throw "whoops";
+        }
+        const extraInfo = new Map<string, string>();
+        extraInfo.set('Format', 'F32_RGBA');
+        const viewerTexture: Viewer.Texture = { name, surfaces: [upscaleCanvas], extraInfo };
+
+        this.gfxTextures.push(texture);
+        this.viewerTextures.push(viewerTexture);
+        this.textureNames.push(name);
+    }
 }
 
 function translateAddressMode(addrMode: TextureAddressMode): GfxWrapMode {
@@ -303,8 +370,9 @@ export class AglProgram extends DeviceProgram {
     public static _u1: number = 5;
     public static _u2: number = 6;
     public static _u3: number = 7;
-    public static _q0: number = 8; // cubemap
-    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3', '_q0'];
+    public static _m0: number = 8; // cubemap
+    public static _lut0: number = 9; // cDirectionalLightColor
+    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3', '_m0', '_lut0' ];
 
     public static ub_ShapeParams = 0;
     public static ub_MdlEnvView = 1; // and ub_HDRTranslate
@@ -322,8 +390,8 @@ export class AglProgram extends DeviceProgram {
         assert(this.fmat.samplerInfo.length <= 8);
 
         if (this.fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
-            this.frag = generateShaderUtil() + generateSkyFragmentShader(this);
-            this.vert = generateShaderUtil() + generateSkyVertexShader();
+            this.frag = generateShaderUtil() + generateRenderSkyFragment(this);
+            this.vert = generateShaderUtil() + generateRenderSkyVertex();
             return;
         }
 
@@ -338,8 +406,8 @@ export class AglProgram extends DeviceProgram {
 
         this.isTranslucent = alphaIsTranslucent && !this.getShaderOptionBoolean(`enable_alphamask`);
 
-        this.frag = generateShaderUtil() + generateFragmentShader(this);
-        this.vert = generateShaderUtil() + generateVertexShader(this);
+        this.frag = generateShaderUtil() + generateRenderMaterialFragment(this);
+        this.vert = generateShaderUtil() + generateRenderMaterialVertex(this);
     }
 
     public static globalDefinitions = `
@@ -379,6 +447,19 @@ layout(std140) uniform ub_MdlEnvView {
     vec4 cScrSize;
     vec3 cCameraPos;
     float _padding3;
+
+    // Fog here since we're short on uniform blocks
+    vec4 cFogColor;         // .rgb = color, .a = slope
+    float cFogStart;
+    float cFogMax;
+    vec2 _padding4;
+    vec4 cYFogColor;        // .rgb = color, .a = slope
+    float cYFogStart;
+    float cYFogMax;
+    vec3 cViewAxisY;
+    float _padding5;
+    vec3 cViewAxisZ;
+    float _padding6;
 } mdlEnvView;
 
 layout(std140) uniform ub_Material {
@@ -464,6 +545,7 @@ uniform sampler2D u_Texture5;
 uniform sampler2D u_Texture6;
 uniform sampler2D u_Texture7;
 uniform samplerCube u_CubemapTexture0;
+uniform sampler2D u_DirectionalLightLUT;
 `;
 
     public override both = AglProgram.globalDefinitions;
@@ -531,7 +613,7 @@ uniform samplerCube u_CubemapTexture0;
         }
     }
 
-    public genUniform(num: number): string {
+    public genUniform(num: number, additional: string = 'vec2(0.0)'): string {
         const shaderSamplerName = `_u${num}`;
         
         let textureUnit: number;
@@ -549,7 +631,7 @@ uniform samplerCube u_CubemapTexture0;
             ${this.getShaderOptionBoolean(`enable_uniform${num}_mul_color`)},
             ${this.getShaderOptionBoolean(`enable_uniform${num}_mul_vtxcolor`)},
             ${this.getShaderOptionBoolean(`enable_uniform${num}_roughness_lod`)},
-            vec2(0.0))
+            ${additional})
         `;
     }
 
@@ -640,6 +722,18 @@ function translateBlendDstFactor(fmat: FMAT): GfxBlendFactor {
     return translateRenderInfoBlendFactor(fmat.renderInfo.get('color_blend_rgb_dst_func')!);
 }
 
+function createDirectionalLightSampler(cache: GfxRenderCache): GfxSampler {
+    return cache.createSampler({
+        wrapS: GfxWrapMode.Clamp,
+        wrapT: GfxWrapMode.Clamp,
+        minFilter: GfxTexFilterMode.Bilinear,
+        magFilter: GfxTexFilterMode.Bilinear,
+        mipFilter: GfxMipFilterMode.Linear,
+        minLOD: 0,
+        maxLOD: 0,
+    });
+}
+
 class FMATInstance {
     public gfxSamplers: GfxSampler[] = [];
     public textureMapping: TextureMapping[] = [];
@@ -654,7 +748,7 @@ class FMATInstance {
         // Fill in our texture mappings.
         assert(fmat.samplerInfo.length === fmat.textureName.length);
 
-        this.textureMapping = nArray(9, () => new TextureMapping());
+        this.textureMapping = nArray(11, () => new TextureMapping());
         for (let i = 0; i < fmat.samplerInfo.length; i++) {
             const samplerInfo = fmat.samplerInfo[i];
             const gfxSampler = cache.createSampler({
@@ -687,11 +781,17 @@ class FMATInstance {
             });
             this.gfxSamplers.push(gfxSampler);
 
-            textureHolder.fillTextureMapping(this.textureMapping[8], cubemapTextureName);
-            this.textureMapping[8].gfxSampler = gfxSampler;
+            textureHolder.fillTextureMapping(this.textureMapping[AglProgram._m0], cubemapTextureName);
+            this.textureMapping[AglProgram._m0].gfxSampler = gfxSampler;
         } else {
             console.info('No cubemap found for material', fmat.name);
         }
+
+        const lutSampler = createDirectionalLightSampler(cache);
+        this.gfxSamplers.push(lutSampler);
+
+        textureHolder.fillTextureMapping(this.textureMapping[AglProgram._lut0], "LUT");
+        this.textureMapping[AglProgram._lut0].gfxSampler = lutSampler;
 
         this.gfxProgram = cache.createProgram(this.program);
 
@@ -1174,11 +1274,23 @@ class FSHPMeshInstance {
     }
 }
 
+// TODO: Move to Scenes
+export function latLonToDirection(latitudeRad: number, longitudeRad: number): { x: number; y: number; z: number } {
+    const latitudeX = -Math.cos(latitudeRad);
+    
+    return {
+        x: Math.sin(longitudeRad) * latitudeX, // x
+        y: -Math.sin(latitudeRad), // y
+        z: Math.cos(longitudeRad) * latitudeX, // z
+    };
+}
+
 const scratchMatrix = mat4.create();
 const bboxScratch = new AABB();
 class FSHPInstance {
-    private lodMeshInstances: FSHPMeshInstance[] = [];
+    public lodMeshInstances: FSHPMeshInstance[] = [];
     public visible = true;
+    public enableCulling = true;
 
     constructor(public fshpData: FSHPData, private fmatInstance: FMATInstance) {
         // Only construct the first LOD mesh for now.
@@ -1195,17 +1307,24 @@ class FSHPInstance {
     }
 
     private fillMdlEnvView(d: Float32Array, offs: number, viewerInput: Viewer.ViewerRenderInput, modelMatrix: mat4): number {
+        const preset = OdysseySceneDesc.graphicsPreset!;
+        
         d[offs++] = 1.0;  // HDRTranslate_uHDRPower
         d[offs++] = 2.2;  // HDRTranslate_uDynamicRange
         offs += 2;          // padding
+
+        const dir = latLonToDirection(preset.DirectionalLight.DirectionParam.Y, preset.DirectionalLight.DirectionParam.X);
         
-        const lightDir = vec3.fromValues(0.3, 0.9, -0.2);
+        // const lightDir = vec3.fromValues(0.3, 0.9, -0.2);
+        const lightDir = vec3.fromValues(-dir.x, -dir.y, -dir.z);
         vec3.normalize(lightDir, lightDir);
         // cDirLightViewDirFetchPos
         d[offs++] = lightDir[0];
         d[offs++] = lightDir[1];
         d[offs++] = lightDir[2];
-        d[offs++] = 0.5;
+        d[offs++] = 0.5; // LUT position
+
+        console.log(`Light Dir: (${lightDir[0].toFixed(3)}, ${lightDir[1].toFixed(3)}, ${lightDir[2].toFixed(3)})`);
 
         const viewMatrix = scratchMatrix;
         computeViewMatrix(viewMatrix, viewerInput.camera);
@@ -1263,6 +1382,52 @@ class FSHPInstance {
         d[offs++] = viewerInput.camera.worldMatrix[13];
         d[offs++] = viewerInput.camera.worldMatrix[14];
         offs += 1; // padding
+
+        const fog = preset.Fog;
+        const yFog = preset.YFog;
+
+        // Fog parameters
+        // cFogColor
+        d[offs++] = fog.Color.R / 255.0;
+        d[offs++] = fog.Color.G / 255.0;
+        d[offs++] = fog.Color.B / 255.0;
+        // d[offs++] = 1.0;
+        // d[offs++] = 0.0;
+        // d[offs++] = 0.0;
+        d[offs++] = fog.IsEnable ? fog.Slope / 1000.0 : 0.0;
+        
+        d[offs++] = fog.Start;
+        d[offs++] = fog.Max;
+        offs += 2; // padding
+        
+        // cYFogColor
+        d[offs++] = yFog.Color.R / 255.0;
+        d[offs++] = yFog.Color.G / 255.0;
+        d[offs++] = yFog.Color.B / 255.0;
+        // d[offs++] = yFog.IsEnable ? yFog.Slope / 1000.0 : 0.0;
+        d[offs++] = 0.0; // TODO: y fog is broken
+        
+        d[offs++] = yFog.Start;
+        d[offs++] = yFog.Max;
+        
+        // cViewAxisY
+        const worldUp = vec3.fromValues(0.0, 1.0, 0.0);
+        const viewAxisY = vec3.create();
+        vec3.transformMat3(viewAxisY, worldUp, mat3.fromMat4(mat3.create(), viewMatrix));
+        d[offs++] = viewAxisY[0];
+        d[offs++] = viewAxisY[1];
+        d[offs++] = viewAxisY[2];
+        offs += 1; // padding
+        
+        // cViewAxisZ
+        const worldForward = vec3.fromValues(0.0, 0.0, 1.0);
+        const viewAxisZ = vec3.create();
+        vec3.transformMat3(viewAxisZ, worldForward, mat3.fromMat4(mat3.create(), viewMatrix));
+        d[offs++] = viewAxisZ[0];
+        d[offs++] = viewAxisZ[1];
+        d[offs++] = viewAxisZ[2];
+        offs += 1; // padding
+
         
         return offs;
     }
@@ -1280,8 +1445,8 @@ class FSHPInstance {
         offs += fillMatrix4x4(d, offs, viewerInput.camera.projectionMatrix);
         offs += fillMatrix4x3(d, offs, this.computeModelView(modelMatrix, viewerInput));
          
-        // ub_MdlEnvView has camera, environment, and added ub_HDRTranslate data
-        const mdlEnvOffs = template.allocateUniformBuffer(AglProgram.ub_MdlEnvView, 132);
+        // ub_MdlEnvView has camera, environment, now ub_HDRTranslate, and now fog data
+        const mdlEnvOffs = template.allocateUniformBuffer(AglProgram.ub_MdlEnvView, 148);
         const envData = template.mapUniformBufferF32(AglProgram.ub_MdlEnvView);
         this.fillMdlEnvView(envData, mdlEnvOffs, viewerInput, modelMatrix);
          
@@ -1298,7 +1463,7 @@ class FSHPInstance {
 
         for (let i = 0; i < this.lodMeshInstances.length; i++) {
             bboxScratch.transform(this.lodMeshInstances[i].meshData.mesh.bbox, modelMatrix);
-            if (!viewerInput.camera.frustum.contains(bboxScratch))
+            if (this.enableCulling && !viewerInput.camera.frustum.contains(bboxScratch))
                 continue;
 
             this.lodMeshInstances[i].prepareToRender(device, renderInstManager, viewerInput);
@@ -1309,7 +1474,7 @@ class FSHPInstance {
 }
 
 const bindingLayouts: GfxBindingLayoutDescriptor[] = [
-    { numUniformBuffers: 4, numSamplers: 9, samplerEntries: [
+    { numUniformBuffers: 4, numSamplers: 10, samplerEntries: [
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
@@ -1319,6 +1484,7 @@ const bindingLayouts: GfxBindingLayoutDescriptor[] = [
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
         { dimension: GfxTextureDimension.Cube, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.UnfilterableFloat, },
     ] }
 ];
 
@@ -1369,19 +1535,33 @@ export class FMDLRenderer {
 export class SkyRenderer extends FMDLRenderer {
     constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, fmdlData: FMDLData) {
         super(device, cache, textureHolder, fmdlData);
+
+        for (let i = 0; i < this.fshpInst.length; i++) {
+            this.fshpInst[i].enableCulling = false;
+
+            // HACK: Moons get culled out after rotation, this bypasses it
+            const meshData = this.fshpInst[i].lodMeshInstances[0].meshData;
+            meshData.mesh.bbox.min[0] = -1000000;
+            meshData.mesh.bbox.min[1] = -1000000;
+            meshData.mesh.bbox.min[2] = -1000000;
+            meshData.mesh.bbox.max[0] = 1000000;
+            meshData.mesh.bbox.max[1] = 1000000;
+            meshData.mesh.bbox.max[2] = 1000000;
+        }
     }
 
     public override prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
         if (!this.visible)
             return;
 
-        mat4.identity(this.modelMatrix);
+        // mat4.identity(this.modelMatrix);
 
         const template = renderInstManager.pushTemplate();
         template.setBindingLayouts(bindingLayouts);
 
-        for (let i = 0; i < this.fshpInst.length; i++)
+        for (let i = 0; i < this.fshpInst.length; i++) {
             this.fshpInst[i].prepareToRender(device, renderInstManager, this.modelMatrix, viewerInput);
+        }
 
         renderInstManager.popTemplate();
     }

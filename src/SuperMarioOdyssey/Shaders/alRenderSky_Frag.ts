@@ -1,6 +1,6 @@
-import { AglProgram } from './Render.js';
+import { AglProgram } from '../Render.js';
 
-export function generateSkyFragmentShader(program: AglProgram): string {
+export function generateRenderSkyFragment(program: AglProgram): string {
     return `
 precision mediump float;
 

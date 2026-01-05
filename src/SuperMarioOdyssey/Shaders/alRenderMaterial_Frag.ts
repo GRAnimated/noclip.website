@@ -1,6 +1,7 @@
-import { AglProgram } from './Render.js';
+import { AglProgram } from '../Render.js';
+import { generateFogCode } from './alRenderFog_Frag.js';
 
-export function generateFragmentShader(program: AglProgram): string {
+export function generateRenderMaterialFragment(program: AglProgram): string {
     return `
 precision mediump float;
 
@@ -18,6 +19,8 @@ in vec4 v_VtxColor;
 in vec4 v_IrradianceVertex;
 in vec2 v_SphereCoords;
 in vec4 v_PerspDiv;
+
+${ generateFogCode() }
 
 vec2 SelectTexCoord(int mtx_select)
 {
@@ -240,6 +243,19 @@ vec4 CalculateOutput(int flag)
     else if (flag == 170) return CalculateProcTexture3D();
 
     return vec4(1.0, 0.0, 1.0, 1.0);
+}
+
+vec4 GetTransparentTexOutput(int flag, float bias_x, float bias_y)
+{
+    vec2 bias = vec2(bias_x, bias_y);
+
+    if (flag == 10)      return CalculateBaseColor(bias);
+    else if (flag == 50) return ${program.genUniform(0, 'bias')};
+    else if (flag == 51) return ${program.genUniform(1, 'bias')};
+    else if (flag == 52) return ${program.genUniform(2, 'bias')};
+    else if (flag == 53) return ${program.genUniform(3, 'bias')};
+    else if (flag == 54) return ${program.genUniform(4, 'bias')};
+    return vec4(0.0);
 }
 
 vec4 CalculateCofBlendOutput(int flag, int cof_map)
@@ -477,6 +493,14 @@ Light SetupLight(vec3 N, vec3 view_pos)
     return light;
 }
 
+float CalculateDirectionalLightWrap(vec3 N)
+{
+    float NV = dot(vec3(N), mdlEnvView.cDirLightViewDirFetchPos.xyz);
+
+    float lighting_factor = clamp(fma(NV, 0.5, 0.5) * fma(NV, 0.5, 0.5) - clamp(NV, 0.0, 1.0), 0.0, 1.0);
+    return lighting_factor * clamp(-0.0 + mat.wrap_coef, 0.0, 1.0);
+}
+
 vec4 CalculateDiffuseIrradianceLight(Light light)
 {
     vec4 irradiance = vec4(0.0, 0.0, 0.0, 1.0);
@@ -563,14 +587,21 @@ void main() {
     // View tangents
     vec3 view_tangent = vec3(1, 0, 0);
     vec3 view_bitangent = vec3(1, 0, 1);
-    // if (o_normal != 30) //has tangents used // TEMP
-    if (true) {
+    // has tangents used
+    if (${program.getShaderOptionNumber('o_normal')} != 30) {
         vec3 tangent = vec3(v_Tangents.xyz);
         vec3 bitangent = vec3(v_Tangents.w, v_Bitangents.xy);
 
         view_tangent = multMtx34Vec3(mdlEnvView.cView, tangent);
         view_bitangent = multMtx34Vec3(mdlEnvView.cView, bitangent);
     }
+
+    //Metalness adjust
+    metalness = saturate(metalness);
+
+    //Roughness adjust
+    roughness *= mat.force_roughness;
+    roughness = saturate(roughness);
 
     vec3 vertex_normal = v_Normal;
 
@@ -581,26 +612,70 @@ void main() {
 
     //Normal to eye
     float N_I = clamp(fma(view_normal.z, -dir.z,
-        fma(view_normal.x,  -dir.x, 
-            view_normal.y * -dir.y)), 0.0, 1.0);
+                      fma(view_normal.x,  -dir.x, 
+                          view_normal.y * -dir.y)), 0.0, 1.0);
 
     // TODO: Dirt stain
 
+    // refract
     float refract_eta = GetComp(${program.genOutput('o_refract_eta')}, ${program.getShaderOptionNumber('refract_eta_component')}).r;
     float refract_rate = GetComp(${program.genOutput('o_refract_rate')}, ${program.getShaderOptionNumber('refract_rate_component')}).r;
 
     vec3 refract_view =  refract_eta * -N_I * view_normal + dir * mat.refract_thickness; 
 
-    //refract bias
+    // refract bias
     float refract_bias_x = dot(refract_view, view_tangent);
     float refract_bias_y = -dot(refract_view, view_bitangent);
 
-    // TODO: Cloth
+    // Cloth
+    float cloth_value = 0.0;
+    if (${program.getShaderOptionBoolean('enable_cloth_nov')} == true)
+    {
+        // cloth color/output
+        vec4 cloth_map = ${program.genOutput('o_cloth_map')};
+        // cloth region to affect
+        vec2 cloth_mask = GetComp(${program.genOutput('o_cloth_mask_map')}, ${program.getShaderOptionNumber('cloth_mask_component')}).rg;
+
+        float nov = N_I;
+
+        // float nov = clamp(-dot(view_normal, dir), 0.0, 1.0);
+        if (${program.getShaderOptionBoolean('is_cloth_nov_reverse')} == true)
+            nov = clamp(1.0 - nov, 0.0, 1.0);
+
+        // peak offset
+        float peak_pos = nov - mat.cloth_nov_peak_pos0;
+        // tone and peak
+        float nov_tone = pow(nov, mat.cloth_nov_tone_pow0); 
+        float nov_peak = exp2(peak_pos * 0.0 - peak_pos * mat.cloth_nov_peak_pow0 * 100.0) * mat.cloth_nov_peak_intensity0; 
+        // cloth output
+        cloth_value = clamp(nov_tone * mat.cloth_nov_slope0 + nov_peak, 0.0, 1.0);
+        // apply mask
+        cloth_value *= clamp(cloth_mask.x + -0.0, 0.0, 1.0);
+
+        // random noise mask
+        if (${program.getShaderOptionBoolean('is_cloth_nov_use_rnd_noise_mask')} == true)
+        {
+            float noise = sin(fma(cloth_mask.y * mat.cloth_nov_noise_mask_scale0.y,
+                78.233, cloth_mask.x * mat.cloth_nov_noise_mask_scale0.y * 12.9898005)) * 43758.5469;
+
+            cloth_value = clamp(fma(cloth_value * (noise - floor(noise) + -0.5), 40.0, cloth_value), 0.0, 1.0);
+        }
+        // Apply to diffuse
+        base_color.rgb = mix(base_color.rgb, cloth_map.rgb, cloth_value);
+    }
 
     if (${program.getShaderOptionBoolean('enable_ao')} == true)
         base_color.rgb *= ao.rgb;
 
-    // TODO: Transparency
+    // Transparency
+    if (has_transparent_tex && ${program.getShaderOptionNumber('transparent_tex_type')} == 10) // TRANS_TEX_TYPE_BASE_COLOR
+    {
+        vec3 refract_color = ${program.genOutput('o_refract_color')}.rgb;
+        vec4 transparent_tex = GetTransparentTexOutput(${program.getShaderOptionNumber('o_transparent_tex')}, refract_bias_x, refract_bias_y);
+
+        //refract mix
+        base_color.rgb = fma(vec3(refract_rate), fma(transparent_tex.rgb, refract_color, 0.0 - base_color.rgb), base_color.rgb);
+    }
 
     // Lighting
     Light light = SetupLight(N, eye_to_pos);
@@ -746,13 +821,19 @@ void main() {
     
     // TODO: metal flake emission
 
-    // TODO: SSS
+    if (${program.getShaderOptionBoolean('enable_sss')} == true)
+    {
+        float light_intensity = CalculateDirectionalLightWrap(view_normal);
+        light_buf.rgb += light_color.xyz * diffuseTerm.rgb * light_intensity * sss.r * (1.0 / PI);
+    }
 
     // TODO: if enable_translucent, adjust for shadows
 
     // clamp 0 - 2048 due to HDR/tone mapping
     light_buf.rgb = max(light_buf.rgb, 0.0);
     light_buf.rgb = min(light_buf.rgb, 2048.0);
+
+    light_buf.rgb = CalculateFog(light_buf.rgb, eye_to_pos);
 
     gl_FragColor = vec4(light_buf.rgb, light_buf.a);
 

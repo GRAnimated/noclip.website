@@ -1,6 +1,6 @@
-import { AglProgram } from './Render.js';
+import { AglProgram } from '../Render.js';
 
-export function generateVertexShader(program: AglProgram): string {
+export function generateRenderMaterialVertex(program: AglProgram): string {
     return `
 layout(location = 0) in vec3 _p0;
 layout(location = 1) in vec4 _c0;
@@ -36,18 +36,15 @@ void main() {
     v_TexCoord3 = _u3;
     v_VtxColor = _c0;
 
-    vec4 view_pos = multMtx34Vec4(mdlEnvView.cView, vec4(_p0, 1.0));
-    v_ViewPos.zw = view_pos.xy;
-    v_LightColorVPosZ.w = view_pos.z;
+    v_ViewPos.zw = t_PositionView.xy;
+    v_LightColorVPosZ.w = t_PositionView.z;
 
-    // Calculate light color
-    vec3 light_color = vec3(1.0); // TEMP
+    vec3 light_color = textureLod(u_DirectionalLightLUT, vec2(mdlEnvView.cDirLightViewDirFetchPos.w, 0.5), 0.0).xyz;
     
-    // vec3 light_color = textureLod(cDirectionalLightColor, vec2(mdlEnvView.cDirLightViewDirFetchPos.w, 0.5), 0.0).xyz;
-    
+    // temp
+    light_color *= 5.0;
+
     v_LightColorVPosZ.xyz = light_color;
-
-    const float MAX_LOD = 5.0;
    
     if (${program.getShaderOptionBoolean('is_apply_irradiance_pixel')} == false)
     {
