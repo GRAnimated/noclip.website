@@ -22,18 +22,18 @@ import { GfxRenderCache } from '../gfx/render/GfxRenderCache.js';
 import { GfxRenderHelper } from '../gfx/render/GfxRenderHelper.js';
 import { makeBackbufferDescSimple, standardFullClearRenderPassDescriptor } from '../gfx/helpers/RenderGraphHelpers.js';
 import { setAttachmentStateSimple } from '../gfx/helpers/GfxMegaStateDescriptorHelpers.js';
-import { GfxrAttachmentSlot } from '../gfx/render/GfxRenderGraph.js';
+import { GfxrAttachmentSlot, GfxrRenderTargetID } from '../gfx/render/GfxRenderGraph.js';
 import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { GfxShaderLibrary } from '../gfx/helpers/GfxShaderLibrary.js';
 import { createBufferFromData, createBufferFromSlice } from '../gfx/helpers/BufferHelpers.js';
-import { generateRenderMaterialFragment } from './Shaders/alRenderMaterial_Frag.js';
-import { generateRenderMaterialVertex } from './Shaders/alRenderMaterial_Vertex.js';
-import { generateRenderSkyFragment } from './Shaders/alRenderSky_Frag.js';
-import { generateRenderSkyVertex } from './Shaders/alRenderSky_Vertex.js';
 import { generateShaderUtil } from './Shaders/ShaderUtil.js';
-import { OdysseySceneDesc, GraphicsPreset } from './Scenes.js';
+import { OdysseySceneDesc, GraphicsPreset, OdysseyRenderer } from './Scenes.js';
 import { convertToCanvasData } from '../gfx/helpers/TextureConversionHelpers.js';
 import { MathConstants } from '../MathHelpers.js';
+import { OdysseyProgram } from './OdysseyProgram.js';
+import { RenderMaterial } from './Shaders/RenderMaterial.js';
+import { RenderSky } from './Shaders/RenderSky.js';
+import { fillHdrComposeUniforms, HdrCompose } from './Shaders/HdrCompose.js';
 
 export class BRTITextureHolder extends TextureHolder {
     public addFRESTextures(device: GfxDevice, fres: FRES): void {
@@ -361,299 +361,11 @@ class ModelAdditionalInfo {
     public proj_mtx3 = mat4.create();
 }
 
-export class AglProgram extends DeviceProgram {
-    public static _p0: number = 0;
-    public static _c0: number = 1;
-    public static _u0: number = 2;
-    public static _n0: number = 3;
-    public static _t0: number = 4;
-    public static _u1: number = 5;
-    public static _u2: number = 6;
-    public static _u3: number = 7;
-    public static _m0: number = 8; // cubemap
-    public static _lut0: number = 9; // cDirectionalLightColor
-    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3', '_m0', '_lut0' ];
-
-    public static ub_ShapeParams = 0;
-    public static ub_MdlEnvView = 1; // and ub_HDRTranslate
-    public static ub_Material = 2;
-    public static ub_ModelAdditionalInfo = 3;
-    // ub_MdlMtx  - bone matrices
-    // ub_Shp     - shape transform
-
-    public isTranslucent: boolean = false;
-
-    constructor(public fmat: FMAT) {
-        super();
-
-        this.name = this.fmat.name;
-        assert(this.fmat.samplerInfo.length <= 8);
-
-        if (this.fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
-            this.frag = generateShaderUtil() + generateRenderSkyFragment(this);
-            this.vert = generateShaderUtil() + generateRenderSkyVertex();
-            return;
-        }
-
-        if (this.getShaderOptionNumber('vtxcolor_type') >= 0)
-            this.defines.set('OPT_vtxcolor', '1');
-
-        let alphaIsTranslucent = false;
-        try {
-            alphaIsTranslucent = this.outputIsTranslucent('o_alpha');
-        } catch(e) {
-        }
-
-        this.isTranslucent = alphaIsTranslucent && !this.getShaderOptionBoolean(`enable_alphamask`);
-
-        this.frag = generateShaderUtil() + generateRenderMaterialFragment(this);
-        this.vert = generateShaderUtil() + generateRenderMaterialVertex(this);
-    }
-
-    public static globalDefinitions = `
-precision mediump float;
-
-${GfxShaderLibrary.MatrixLibrary}
-
-layout(std140) uniform ub_ShapeParams {
-    Mat4x4 u_Projection;
-    Mat3x4 u_ModelView;
-};
-
-layout(std140) uniform ub_MdlEnvView {
-    float HDRTranslate_uHDRPower;     // moved here due to reduce the amount of uniform buffers
-    float HDRTranslate_uDynamicRange;
-    vec2 _padding0;
-    vec4 cDirLightViewDirFetchPos; // Directional light
-    
-    Mat3x4 cView;
-    Mat3x4 cViewInv;
-    Mat4x4 cViewProj;
-    Mat3x4 cInvProjView;
-    vec4 _padding1;
-    Mat4x4 cInvProj;
-    Mat3x4 uInvProjViewNoTrans;
-
-    float cInvExposure;
-    float uIrradianceScale;
-    vec2 _padding2;
-    
-    float cNear;
-    float cFar;
-    float cRange;
-    float cInvRange;
-    vec2 cTanFovyHalf;
-    vec2 cScrProjOffset;
-    vec4 cScrSize;
-    vec3 cCameraPos;
-    float _padding3;
-
-    // Fog here since we're short on uniform blocks
-    vec4 cFogColor;         // .rgb = color, .a = slope
-    float cFogStart;
-    float cFogMax;
-    vec2 _padding4;
-    vec4 cYFogColor;        // .rgb = color, .a = slope
-    float cYFogStart;
-    float cYFogMax;
-    vec3 cViewAxisY;
-    float _padding5;
-    vec3 cViewAxisZ;
-    float _padding6;
-} mdlEnvView;
-
-layout(std140) uniform ub_Material {
-    vec4 const_color0;
-    vec4 const_color1;
-    vec4 const_color2;
-    vec4 const_color3;
-    float const_single0;
-    float const_single1;
-    float const_single2;
-    float const_single3;
-    vec4 base_color_mul_color;
-    vec4 uniform0_mul_color;
-    vec4 uniform1_mul_color;
-    vec4 uniform2_mul_color;
-    vec4 uniform3_mul_color;
-    vec4 uniform4_mul_color;
-    vec4 proc_texture_2d_mul_color;
-    vec4 proc_texture_3d_mul_color;
-    mat2x4 tex_mtx0;
-    mat2x4 tex_mtx1;
-    mat2x4 tex_mtx2;
-    mat2x4 tex_mtx3;
-    float displacement_scale;
-    float displacement1_scale;
-    vec2 padding;
-    vec4 displacement_color;
-    vec4 displacement1_color;
-    float wrap_coef;
-    float refract_thickness;
-    vec2 indirect0_scale;
-    vec2 indirect1_scale;
-    float alpha_test_value;
-    float force_roughness;
-    float sphere_rate_color0;
-    float sphere_rate_color1;
-    float sphere_rate_color2;
-    float sphere_rate_color3;
-    mat4 mirror_view_proj;
-    float decal_range;
-    float gbuf_fetch_offset;
-    float translucence_sharpness;
-    float translucence_sharpness_strength;
-    float translucence_factor;
-    float translucence_silhouette_stress;
-    float indirect_depth_scale;
-    float cloth_nov_peak_pos0;
-    float cloth_nov_peak_pow0;
-    float cloth_nov_peak_intensity0;
-    float cloth_nov_tone_pow0;
-    float cloth_nov_slope0;
-    float cloth_nov_emission_scale0;
-    vec3 cloth_nov_noise_mask_scale0;
-    vec4 proc_texture_3d_scale;
-    // vec4 flow0_param;
-    vec4 ripple_emission_color;
-    vec4 hack_color;
-    vec4 stain_color;
-    float stain_uv_scale;
-    float stain_rate;
-    float material_lod_roughness;
-    float material_lod_metalness;
-} mat;
-
-layout(std140) uniform ub_ModelAdditionalInfo {
-    float model_alpha_mask;
-    float normal_axis_x_scale;
-    vec2 uv_offset;
-    mat4 proj_mtx0;
-    mat4 proj_mtx1;
-    mat4 proj_mtx2;
-    mat4 proj_mtx3;
-    vec4 prog_constant0;
-    vec4 prog_constant1;
-} modelInfo;
-
-uniform sampler2D u_Texture0;
-uniform sampler2D u_Texture1;
-uniform sampler2D u_Texture2;
-uniform sampler2D u_Texture3;
-uniform sampler2D u_Texture4;
-uniform sampler2D u_Texture5;
-uniform sampler2D u_Texture6;
-uniform sampler2D u_Texture7;
-uniform samplerCube u_CubemapTexture0;
-uniform sampler2D u_DirectionalLightLUT;
-`;
-
-    public override both = AglProgram.globalDefinitions;
-
-    public lookupSamplerIndex(shadingModelSamplerBindingName: string) {
-        // Translate to a local sampler by looking in the sampler map, and then that's the index we use.
-        const samplerName = assertExists(this.fmat.shaderAssign.samplerAssign.get(shadingModelSamplerBindingName));
-        const samplerIndex = this.fmat.samplerInfo.findIndex((sampler) => sampler.name === samplerName);
-        assert(samplerIndex >= 0);
-        return samplerIndex;
-    }
-
-    public getShaderOptionNumber(optionName: string): number {
-        const optionValue = assertExists(this.fmat.shaderAssign.shaderOption.get(optionName), `Shader option ${optionName} not found in material ${this.fmat.name}`);
-        return +optionValue;
-    }
-
-    public getShaderOptionBoolean(optionName: string): boolean {
-        const optionValue = assertExists(this.fmat.shaderAssign.shaderOption.get(optionName), `Shader option ${optionName} not found in material ${this.fmat.name}`);
-        assert(optionValue === '0' || optionValue === '1');
-        return optionValue === '1';
-    }
-
-    public condShaderOption(optionName: string, branchTrue: () => string, branchFalse: () => string = () => ''): string {
-        return this.getShaderOptionBoolean(optionName) ? branchTrue() : branchFalse();
-    }
-
-    public selectTexCoord(mtx_select: number): string {
-        if (mtx_select == 10)  //tex coord 0
-            return 'v_TexCoord0';
-        else if  (mtx_select == 11) //tex coord 1
-            return 'v_TexCoord1';
-        else if  (mtx_select == 12) //tex coord 2
-            return 'v_TexCoord2';
-        else if  (mtx_select == 13) //tex coord 3
-            return 'v_TexCoord3';
-        else if  (mtx_select == 20) //indirect coord 0
-            return 'v_IrradianceVertex.xy'; // is this right?
-        else if  (mtx_select == 21) //indirect coord 1
-            return 'v_IrradianceVertex.zw'; // same here
-        else if  (mtx_select == 30) //sphere mapping
-            return 'v_SphereCoords.xy';
-        else //TODO 50 - 54 are proj texture types
-            return 'v_TexCoord0.xy';
-    }
-
-    public genSample(shadingModelSamplerBindingName: string, texCoord: string, additional: string = ''): string {
-        try {
-            const samplerIndex = this.lookupSamplerIndex(shadingModelSamplerBindingName);
-            const uv = texCoord;
-            return `texture(u_Texture${samplerIndex}, vec2(${uv}.x, ${uv}.y)${additional})`;
-        } catch(e) {
-            // TODO(jstpierre): Figure out wtf is going on.
-            // console.warn(`${this.name}: No sampler by name ${shadingModelSamplerBindingName}`);
-            return `vec4(1.0)`;
-        }
-    }
-
-    public genCubeSample(shadingModelSamplerBindingName: string, direction: string): string {
-        try {
-            const samplerIndex = this.lookupSamplerIndex(shadingModelSamplerBindingName);
-            return `texture(u_CubemapTexture${samplerIndex}, normalize(${direction}))`;
-        } catch (e) {
-            return `vec4(1.0)`;
-        }
-    }
-
-    public genUniform(num: number, additional: string = 'vec2(0.0)'): string {
-        const shaderSamplerName = `_u${num}`;
-        
-        let textureUnit: number;
-        try {
-            textureUnit = this.lookupSamplerIndex(shaderSamplerName);
-        } catch(e) {
-            return `vec4(1.0)`; // no texture bound
-        }
-        
-        return `
-            CalculateUniform(u_Texture${textureUnit},
-            ${this.getShaderOptionNumber(`uniform${num}_fuv_selector`)},
-            ${this.getShaderOptionBoolean(`enable_uniform${num}`)},
-            mat.uniform${num}_mul_color,
-            ${this.getShaderOptionBoolean(`enable_uniform${num}_mul_color`)},
-            ${this.getShaderOptionBoolean(`enable_uniform${num}_mul_vtxcolor`)},
-            ${this.getShaderOptionBoolean(`enable_uniform${num}_roughness_lod`)},
-            ${additional})
-        `;
-    }
-
-    public genOutput(optionName: string): string {
-        const n = this.getShaderOptionNumber(optionName);
-
-        return `CalculateOutput(${n})`;
-    }
-
-    public blendIsTranslucent(instance: number): boolean {
-        if (!this.getShaderOptionBoolean(`enable_blend${instance}`)) return false;
-        return this.outputIsTranslucent(`blend${instance}_src`);
-    }
-
-    public outputIsTranslucent(optionName: string): boolean {
-        const n = this.getShaderOptionNumber(optionName);
-        // 115 is 0.0
-        // 116 is 1.0
-        // 116 is solid
-        if (n === 116) return false;
-        if (n >= 80 && n <= 85) return this.blendIsTranslucent(n - 80);
-        return true; 
+export function createProgramForMaterial(fmat: FMAT): OdysseyProgram {
+    if (fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
+        return new RenderSky(fmat);
+    } else {
+        return new RenderMaterial(fmat);
     }
 }
 
@@ -737,13 +449,13 @@ function createDirectionalLightSampler(cache: GfxRenderCache): GfxSampler {
 class FMATInstance {
     public gfxSamplers: GfxSampler[] = [];
     public textureMapping: TextureMapping[] = [];
-    private program: AglProgram;
+    private program: OdysseyProgram;
     private gfxProgram: GfxProgram;
     private megaStateFlags: Partial<GfxMegaStateDescriptor>;
     private materialParams = new MaterialParams();
 
     constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, public fmat: FMAT) {
-        this.program = new AglProgram(fmat);
+        this.program = createProgramForMaterial(fmat);
 
         // Fill in our texture mappings.
         assert(fmat.samplerInfo.length === fmat.textureName.length);
@@ -781,8 +493,8 @@ class FMATInstance {
             });
             this.gfxSamplers.push(gfxSampler);
 
-            textureHolder.fillTextureMapping(this.textureMapping[AglProgram._m0], cubemapTextureName);
-            this.textureMapping[AglProgram._m0].gfxSampler = gfxSampler;
+            textureHolder.fillTextureMapping(this.textureMapping[OdysseyProgram._m0], cubemapTextureName);
+            this.textureMapping[OdysseyProgram._m0].gfxSampler = gfxSampler;
         } else {
             console.info('No cubemap found for material', fmat.name);
         }
@@ -790,12 +502,13 @@ class FMATInstance {
         const lutSampler = createDirectionalLightSampler(cache);
         this.gfxSamplers.push(lutSampler);
 
-        textureHolder.fillTextureMapping(this.textureMapping[AglProgram._lut0], "LUT");
-        this.textureMapping[AglProgram._lut0].gfxSampler = lutSampler;
+        textureHolder.fillTextureMapping(this.textureMapping[OdysseyProgram._lut0], "LUT");
+        this.textureMapping[OdysseyProgram._lut0].gfxSampler = lutSampler;
 
         this.gfxProgram = cache.createProgram(this.program);
 
-        const isTranslucent = this.program.isTranslucent;
+        const isTranslucent = (this.program instanceof RenderMaterial) ? this.program.isTranslucent : false;
+
         if (fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
             this.megaStateFlags = {
                 cullMode:       GfxCullMode.None,
@@ -820,7 +533,7 @@ class FMATInstance {
 
     // TODO: include material uniforms
     public setOnRenderInst(device: GfxDevice, renderInst: GfxRenderInst): void {
-        const isTranslucent = this.program.isTranslucent;
+        const isTranslucent = (this.program instanceof RenderMaterial) ? this.program.isTranslucent : false;
         const materialLayer = isTranslucent ? GfxRendererLayer.TRANSLUCENT : GfxRendererLayer.OPAQUE;
         renderInst.sortKey = makeSortKey(materialLayer, 0);
         renderInst.setSamplerBindingsFromTextureMappings(this.textureMapping);
@@ -1102,7 +815,7 @@ class FVTXData {
             if (this.inputBufferDescriptors[bufferIndex] === undefined)
                 this.inputBufferDescriptors[bufferIndex] = null;
 
-            const attribLocation = AglProgram.a_Orders.indexOf(vertexAttribute.name);
+            const attribLocation = OdysseyProgram.a_Orders.indexOf(vertexAttribute.name);
             if (attribLocation < 0)
                 continue;
 
@@ -1307,7 +1020,7 @@ class FSHPInstance {
     }
 
     private fillMdlEnvView(d: Float32Array, offs: number, viewerInput: Viewer.ViewerRenderInput, modelMatrix: mat4): number {
-        const preset = OdysseySceneDesc.graphicsPreset!;
+        const preset = OdysseyRenderer.graphicsPreset!;
         
         d[offs++] = 1.0;  // HDRTranslate_uHDRPower
         d[offs++] = 2.2;  // HDRTranslate_uDynamicRange
@@ -1440,24 +1153,24 @@ class FSHPInstance {
         const template = renderInstManager.pushTemplate();
 
         // ub_ShapeParams
-        let offs = template.allocateUniformBuffer(AglProgram.ub_ShapeParams, 16+12);
-        const d = template.mapUniformBufferF32(AglProgram.ub_ShapeParams);
+        let offs = template.allocateUniformBuffer(OdysseyProgram.ub_ShapeParams, 16+12);
+        const d = template.mapUniformBufferF32(OdysseyProgram.ub_ShapeParams);
         offs += fillMatrix4x4(d, offs, viewerInput.camera.projectionMatrix);
         offs += fillMatrix4x3(d, offs, this.computeModelView(modelMatrix, viewerInput));
          
         // ub_MdlEnvView has camera, environment, now ub_HDRTranslate, and now fog data
-        const mdlEnvOffs = template.allocateUniformBuffer(AglProgram.ub_MdlEnvView, 148);
-        const envData = template.mapUniformBufferF32(AglProgram.ub_MdlEnvView);
+        const mdlEnvOffs = template.allocateUniformBuffer(OdysseyProgram.ub_MdlEnvView, 148);
+        const envData = template.mapUniformBufferF32(OdysseyProgram.ub_MdlEnvView);
         this.fillMdlEnvView(envData, mdlEnvOffs, viewerInput, modelMatrix);
          
         // ub_Material
-        const matOffs = template.allocateUniformBuffer(AglProgram.ub_Material, 200); // TODO: calculate right size
-        const matData = template.mapUniformBufferF32(AglProgram.ub_Material);
+        const matOffs = template.allocateUniformBuffer(OdysseyProgram.ub_Material, 200); // TODO: calculate right size
+        const matData = template.mapUniformBufferF32(OdysseyProgram.ub_Material);
         this.fmatInstance.fillMaterialParams(matData, matOffs);
  
         // ub_ModelAdditionalInfo
-        template.allocateUniformBuffer(AglProgram.ub_ModelAdditionalInfo, 16 + 16 + 8 + 64 + 64 + 64 + 64 + 16 + 16);
-        const modelAddData = template.mapUniformBufferF32(AglProgram.ub_ModelAdditionalInfo);
+        template.allocateUniformBuffer(OdysseyProgram.ub_ModelAdditionalInfo, 16 + 16 + 8 + 64 + 64 + 64 + 64 + 16 + 16);
+        const modelAddData = template.mapUniformBufferF32(OdysseyProgram.ub_ModelAdditionalInfo);
         
         this.fmatInstance.setOnRenderInst(device, template);
 
@@ -1574,8 +1287,58 @@ export class BasicFRESRenderer {
     public fmdlRenderers: FMDLRenderer[] = [];
     public skyRenderers: SkyRenderer[] = [];
 
+    private hdrComposeProgram: HdrCompose;
+    private hdrComposeGfxProgram: GfxProgram;
+    private hdrTexture: GfxTexture | null = null;
+    private exposureTexture: GfxTexture | null = null;
+    private fullscreenVertexBuffer: GfxBuffer | null = null;
+    private fullscreenIndexBuffer: GfxBuffer | null = null;
+    private fullscreenInputLayout: GfxInputLayout | null = null;
+
+    // HDR settings
+    public exposure = 18.2;
+    public enableHDR = true;
+
     constructor(device: GfxDevice, public textureHolder: BRTITextureHolder) {
         this.renderHelper = new GfxRenderHelper(device);
+
+        this.hdrComposeProgram = new HdrCompose();
+        this.hdrComposeGfxProgram = this.renderHelper.renderCache.createProgram(this.hdrComposeProgram);
+        
+        this.createFullscreenQuad(device);
+        this.createExposureTexture(device);
+    }
+
+    private createFullscreenQuad(device: GfxDevice): void {
+        const vertices = new Float32Array([
+            -1, -1, 0, 0,
+            1, -1, 1, 0,
+            -1, 1, 0, 1,
+            1, 1, 1, 1,
+        ]);
+        
+        const indices = new Uint16Array([0, 1, 2, 2, 1, 3]);
+        
+        this.fullscreenVertexBuffer = createBufferFromData(device, GfxBufferUsage.Vertex, GfxBufferFrequencyHint.Static, vertices.buffer);
+        this.fullscreenIndexBuffer = createBufferFromData(device, GfxBufferUsage.Index, GfxBufferFrequencyHint.Static, indices.buffer);
+        
+        this.fullscreenInputLayout = this.renderHelper.renderCache.createInputLayout({
+            indexBufferFormat: GfxFormat.U16_R,
+            vertexAttributeDescriptors: [
+                { location: 0, format: GfxFormat.F32_RG, bufferIndex: 0, bufferByteOffset: 0 },
+                { location: 1, format: GfxFormat.F32_RG, bufferIndex: 0, bufferByteOffset: 8 },
+            ],
+            vertexBufferDescriptors: [
+                { byteStride: 16, frequency: GfxVertexBufferFrequency.PerVertex },
+            ],
+        });
+    }
+
+    private createExposureTexture(device: GfxDevice): void {
+        // 1x1 texture
+        this.exposureTexture = device.createTexture(makeTextureDescriptor2D(GfxFormat.F32_RGBA, 1, 1, 1));
+        const exposureData = new Float32Array([this.exposure, this.exposure, this.exposure, this.exposure]);
+        device.uploadTextureData(this.exposureTexture, 0, [exposureData]);
     }
 
     public createPanels(): UI.Panel[] {
@@ -1604,15 +1367,87 @@ export class BasicFRESRenderer {
         this.renderHelper.prepareToRender();
     }
 
+    private renderHdrCompose(device: GfxDevice, builder: any, hdrColorTargetID: GfxrRenderTargetID, viewerInput: Viewer.ViewerRenderInput): GfxrRenderTargetID {
+        if (!this.enableHDR) {
+            return hdrColorTargetID;
+        }
+
+        const ldrColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
+        const ldrColorTargetID = builder.createRenderTargetID(ldrColorDesc, 'LDR Color');
+
+        builder.pushPass((pass: any) => {
+            pass.setDebugName('HDR Compose');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, ldrColorTargetID);
+            
+            pass.attachResolveTexture(hdrColorTargetID);
+            
+            const hdrResolveTextureID = builder.resolveRenderTarget(hdrColorTargetID);
+            
+            const template = this.renderHelper.pushTemplateRenderInst();
+            template.setBindingLayouts(HdrCompose.bindingLayouts);
+
+            pass.exec((passRenderer: any, scope: any) => {
+                // Get the HDR texture
+                const hdrTexture = scope.getResolveTextureForID(hdrResolveTextureID);
+                
+                const renderInst = this.renderHelper.renderInstManager.newRenderInst();
+                
+                // Uniforms
+                let offs = renderInst.allocateUniformBuffer(HdrCompose.ub_HdrComposeInfo, 56);
+                const d = renderInst.mapUniformBufferF32(HdrCompose.ub_HdrComposeInfo);
+                const preset = OdysseyRenderer.graphicsPreset!;
+                fillHdrComposeUniforms(d, offs, preset);
+                
+                const textureMapping = new TextureMapping();
+                textureMapping.gfxTexture = hdrTexture;
+                textureMapping.gfxSampler = this.renderHelper.renderCache.createSampler({
+                    wrapS: GfxWrapMode.Clamp,
+                    wrapT: GfxWrapMode.Clamp,
+                    minFilter: GfxTexFilterMode.Bilinear,
+                    magFilter: GfxTexFilterMode.Bilinear,
+                    mipFilter: GfxMipFilterMode.Nearest,
+                    minLOD: 0, maxLOD: 0,
+                });
+                
+                const exposureMapping = new TextureMapping();
+                exposureMapping.gfxTexture = this.exposureTexture!;
+                exposureMapping.gfxSampler = textureMapping.gfxSampler;
+                
+                renderInst.setSamplerBindingsFromTextureMappings([textureMapping, exposureMapping]);
+                
+                // Setup geometry
+                renderInst.setVertexInput(
+                    this.fullscreenInputLayout!,
+                    [{ buffer: this.fullscreenVertexBuffer!, byteOffset: 0 }],
+                    { buffer: this.fullscreenIndexBuffer!, byteOffset: 0 }
+                );
+                renderInst.setDrawCount(6);
+                
+                renderInst.setGfxProgram(this.hdrComposeGfxProgram);
+                renderInst.setMegaStateFlags({
+                    cullMode: GfxCullMode.None,
+                    depthCompare: GfxCompareMode.Always,
+                    depthWrite: false,
+                });
+                
+                renderInst.drawOnPass(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+
+        return ldrColorTargetID;
+    }
+
     public render(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput) {
         const renderInstManager = this.renderHelper.renderInstManager;
 
         const builder = this.renderHelper.renderGraph.newGraphBuilder();
 
-        const mainColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
+        const hdrColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
+        // hdrColorDesc.pixelFormat = GfxFormat.F16_RGBA;
+        
         const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, viewerInput, standardFullClearRenderPassDescriptor);
 
-        const mainColorTargetID = builder.createRenderTargetID(mainColorDesc, 'Main Color');
+        const hdrColorTargetID = builder.createRenderTargetID(hdrColorDesc, 'HDR Color');
         const mainDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Main Depth');
 
         const camera = viewerInput.camera;
@@ -1621,7 +1456,7 @@ export class BasicFRESRenderer {
         // Sky first
         builder.pushPass((pass) => {
             pass.setDebugName('Sky');
-            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, hdrColorTargetID);
             pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
             pass.exec((passRenderer) => {
                 this.renderInstListSky.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
@@ -1630,15 +1465,17 @@ export class BasicFRESRenderer {
         
         builder.pushPass((pass) => {
             pass.setDebugName('Main');
-            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, mainColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, hdrColorTargetID);
             pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
             pass.exec((passRenderer) => {
                 this.renderInstListMain.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
             });
         });
+
+        const finalColorTargetID = this.renderHdrCompose(device, builder, hdrColorTargetID, viewerInput);
         
-        this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, mainColorTargetID);
-        builder.resolveRenderTargetToExternalTexture(mainColorTargetID, viewerInput.onscreenTexture);
+        this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, finalColorTargetID);
+        builder.resolveRenderTargetToExternalTexture(finalColorTargetID, viewerInput.onscreenTexture);
 
         this.prepareToRender(device, viewerInput);
         this.renderHelper.renderGraph.execute(builder);
@@ -1648,6 +1485,16 @@ export class BasicFRESRenderer {
 
     public destroy(device: GfxDevice): void {
         this.renderHelper.destroy();
+        
+        if (this.hdrTexture)
+            device.destroyTexture(this.hdrTexture);
+        if (this.exposureTexture)
+            device.destroyTexture(this.exposureTexture);
+        if (this.fullscreenVertexBuffer)
+            device.destroyBuffer(this.fullscreenVertexBuffer);
+        if (this.fullscreenIndexBuffer)
+            device.destroyBuffer(this.fullscreenIndexBuffer);
+        
         for (let i = 0; i < this.skyRenderers.length; i++)
             this.skyRenderers[i].destroy(device);
         for (let i = 0; i < this.fmdlRenderers.length; i++)

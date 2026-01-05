@@ -1,4 +1,4 @@
-import { AglProgram } from '../Render.js';
+import { OdysseyProgram } from '../OdysseyProgram.js';
 
 export function generateFogCode(): string {
     return `

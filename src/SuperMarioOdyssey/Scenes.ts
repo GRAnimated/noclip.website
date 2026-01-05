@@ -161,6 +161,34 @@ export type GraphicsPreset = {
         DistanceSlopeScale: number;
         IsEnable: boolean;
     };
+    HdrCompose: {
+        AutoExposureBlendRateDown: number;
+        AutoExposureBlendRateUp: number;
+        AutoExposureHistogramScale: number;
+        AutoExposureIgnoreRangeMax: number;
+        AutoExposureIgnoreRangeMin: number;
+        AutoExposureMid: number;
+        AutoExposureRangeMax: number;
+        AutoExposureRangeMin: number;
+        BlackPoint: number;
+        CameraEffectName: string;
+        CrossOver: number;
+        Exposure: number;
+        LinearAngle: number;
+        LinearStrength: number;
+        Sholuder: number;
+        ShoulderStrength: number;
+        Toe: number;
+        ToeDenominator: number;
+        ToeNumerator: number;
+        ToeStrength: number;
+        ToneMapPowerBase: { X: number; Y: number; Z: number };
+        ToneMapType: number;
+        ToonShadeRate: number;
+        ToonStep: { X: number; Y: number; Z: number };
+        ToonWidth: { X: number; Y: number; Z: number };
+        WhitePoint: number;
+    };
 }
 
 function calcModelMtxFromTRSVectors(dst: mat4, tv: Vector, rv: Vector, sv: Vector): void {
@@ -171,6 +199,8 @@ function calcModelMtxFromTRSVectors(dst: mat4, tv: Vector, rv: Vector, sv: Vecto
 }
 
 export class OdysseyRenderer extends BasicFRESRenderer {
+    public static graphicsPreset: GraphicsPreset | null = null;
+
     constructor(device: GfxDevice, private resourceSystem: ResourceSystem) {
         super(device, resourceSystem.textureHolder);
     }
@@ -179,11 +209,13 @@ export class OdysseyRenderer extends BasicFRESRenderer {
         super.destroy(device);
         this.resourceSystem.destroy(device);
     }
+
+    public setGraphicsPreset(preset: GraphicsPreset): void {
+        OdysseyRenderer.graphicsPreset = preset;
+    }
 }
 
 export class OdysseySceneDesc implements Viewer.SceneDesc {
-    public static graphicsPreset: GraphicsPreset | null = null;
-
     constructor(public id: string, public name: string = id) {
     }
 
@@ -246,7 +278,7 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
             console.log(graphicsPreset);
 
             if (graphicsPreset) {
-                OdysseySceneDesc.graphicsPreset = graphicsPreset;
+                sceneRenderer.setGraphicsPreset(graphicsPreset);
             }
 
             if (entry.ObjectList !== undefined)
@@ -260,7 +292,7 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
             }
             resourceSystem.fetchData(device, dataFetcher, `ObjectData/CubeMap${stageName}`);
 
-            const preset = OdysseySceneDesc.graphicsPreset!;
+            const preset = OdysseyRenderer.graphicsPreset!;
             const color = preset.DirectionalLight.Color;
             const lightColor = { r: color.R, g: color.G, b: color.B, a: color.A * 255.0 };
 
@@ -286,7 +318,7 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                         const skyRenderer = new SkyRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData);
                         mat4.copy(skyRenderer.modelMatrix, placement);
                         
-                        const preset = OdysseySceneDesc.graphicsPreset!;
+                        const preset = OdysseyRenderer.graphicsPreset!;
                         const dir = latLonToDirection(preset.DirectionalLight.DirectionParam.Y, preset.DirectionalLight.DirectionParam.X);
                         mat4.rotateY(skyRenderer.modelMatrix, skyRenderer.modelMatrix, (180 * MathConstants.DEG_TO_RAD) + dir.z);
                         

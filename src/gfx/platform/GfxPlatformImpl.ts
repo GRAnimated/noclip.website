@@ -36,5 +36,7 @@ export function isFormatSamplerKindCompatible(samplerKind: GfxSamplerFormatKind,
     else if (samplerKind === GfxSamplerFormatKind.UnfilterableFloat && (textureKind === GfxSamplerFormatKind.Depth || textureKind === GfxSamplerFormatKind.Float))
         return true;
 
+    console.error(`Incompatible sampler kind ${GfxSamplerFormatKind[samplerKind]} vs texture kind ${GfxSamplerFormatKind[textureKind]}`);
+
     return false;
 }
