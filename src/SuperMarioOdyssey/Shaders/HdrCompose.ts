@@ -6,7 +6,7 @@ import { generateShaderUtil } from './ShaderUtil.js';
 
 export class HdrCompose extends DeviceProgram {
     public static ub_HdrComposeInfo = 0;
-    toneMapType: number = 0; // temp
+    toneMapType: number = 8; // temp
 
     public static bindingLayouts: GfxBindingLayoutDescriptor[] = [
         {
@@ -187,6 +187,45 @@ void main ( void )
 `;
 }
 
+function computeSCurveCoeffsFromPreset(hdr: GraphicsPreset['HdrCompose']):
+{ toe: [number, number, number, number], shoulder: [number, number, number, number] } {
+    const C = hdr.CrossOver;
+    const black = hdr.BlackPoint;
+    const white = hdr.WhitePoint;
+
+    // Map into [0,1] weights
+    const toeStrength = 1.0 / (1.0 + Math.exp(-hdr.Toe));
+    const shoulderStrength = 1.0 / (1.0 + Math.exp(-hdr.Sholuder));
+
+    const span = white - black;
+    const baseMid = (C - black) / span;
+    
+    const toeAmount = (toeStrength - 0.5) * 2.0;           // -1 to 1
+    const shoulderAmount = (shoulderStrength - 0.5) * 2.0; // -1 to 1
+    
+    const toeBias = -toeAmount * 0.0; // pull toward darks
+    const shoulderBias = shoulderAmount * 0.0; // pull toward brights
+
+    let mid = baseMid + shoulderBias - toeBias;
+    mid = Math.min(1.0, Math.max(0.0, mid));
+
+    // how far above C to start compressing toward white, based on white point
+    let shoulderSoftness = (white - C) * 0.0;
+
+    let k = 1.0;
+    if (mid > 0.0 && mid < 1.0) {
+        k = mid / (C * (1.0 - mid));
+    }
+
+    const t = C + shoulderSoftness;
+    const s = mid * (C + t) - C;
+    
+    const toe: [number, number, number, number] = [k, k, 0.0, 1.0];
+    const shoulder: [number, number, number, number] = [1.0, 1.0, s, t];
+
+    return { toe, shoulder };
+}
+
 export function fillHdrComposeUniforms(d: Float32Array, offs: number, preset: GraphicsPreset): number {
     const hdr = preset.HdrCompose;
 
@@ -285,36 +324,22 @@ export function fillHdrComposeUniforms(d: Float32Array, offs: number, preset: Gr
     // uToeDenominator
     d[offs++] = hdr.ToeDenominator;
     
-    // padding
-    d[offs++] = 0.0;
-    d[offs++] = 0.0;
-    
     // uCrossOver
     d[offs++] = hdr.CrossOver;
-    
-    // padding to align vec4
-    d[offs++] = 0.0;
-    d[offs++] = 0.0;
-    d[offs++] = 0.0;
 
-    // TEMP
-    // x/y: scale, z/w: offset
-    const toeCoeff = vec4.fromValues(0.5, 0.5, 0.0, 0.0);
+    const { toe, shoulder } = computeSCurveCoeffsFromPreset(hdr);
 
-    // x/y: scale, z/w: offset
-    const shoulderCoeff = vec4.fromValues(1.0, 1.0, -0.1, 0.85);
-    
     // uToeCoeff (vec4)
-    d[offs++] = toeCoeff[0];
-    d[offs++] = toeCoeff[1];
-    d[offs++] = toeCoeff[2];
-    d[offs++] = toeCoeff[3];
-    
+    d[offs++] = toe[0];
+    d[offs++] = toe[1];
+    d[offs++] = toe[2];
+    d[offs++] = toe[3];
+
     // uSholuderCoeff (vec4)
-    d[offs++] = shoulderCoeff[0];
-    d[offs++] = shoulderCoeff[1];
-    d[offs++] = shoulderCoeff[2];
-    d[offs++] = shoulderCoeff[3];
+    d[offs++] = shoulder[0];
+    d[offs++] = shoulder[1];
+    d[offs++] = shoulder[2];
+    d[offs++] = shoulder[3];
     
     // uLumaCoeff (vec4)
     d[offs++] = 0.0;

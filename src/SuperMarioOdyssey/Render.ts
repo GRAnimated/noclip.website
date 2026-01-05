@@ -1407,11 +1407,15 @@ export class BasicFRESRenderer {
     private fullscreenIndexBuffer: GfxBuffer | null = null;
     private fullscreenInputLayout: GfxInputLayout | null = null;
 
-    // HDR settings
-    public exposure = 2.2;
-    public enableHDR = false;
+    private exposureSlider: UI.Slider;
+    private enableHDR: UI.Checkbox;
+
+    private exposure: number = 2.2;
+
+    private device: GfxDevice;
 
     constructor(device: GfxDevice, public textureHolder: BRTITextureHolder) {
+        this.device = device;
         this.renderHelper = new GfxRenderHelper(device);
 
         this.hdrComposeProgram = new HdrCompose();
@@ -1449,7 +1453,8 @@ export class BasicFRESRenderer {
     private createExposureTexture(device: GfxDevice, textureHolder: BRTITextureHolder): void {
         // 1x1 texture
         this.exposureTexture = device.createTexture(makeTextureDescriptor2D(GfxFormat.F32_RGBA, 1, 1, 1));
-        const exposureData = new Float32Array([this.exposure, this.exposure, this.exposure, this.exposure]);
+        const exposure = this.exposure;
+        const exposureData = new Float32Array([exposure, exposure, exposure, exposure]);
         device.uploadTextureData(this.exposureTexture, 0, [exposureData]);
         
         const name = "Exposure";
@@ -1460,10 +1465,39 @@ export class BasicFRESRenderer {
         textureHolder.textureNames.push(name);
     }
 
+    private updateExposureTexture(): void {
+        if (!this.exposureTexture)
+            return;
+        const exposure = this.exposure;
+        const exposureData = new Float32Array([exposure, exposure, exposure, exposure]);
+        this.device.uploadTextureData(this.exposureTexture, 0, [exposureData]);
+    }
+
     public createPanels(): UI.Panel[] {
         const layersPanel = new UI.LayerPanel();
         layersPanel.setLayers([...this.skyRenderers, ...this.fmdlRenderers]);
-        return [layersPanel];
+
+        const cameraPanel = new UI.Panel();
+
+        cameraPanel.customHeaderBackgroundColor = UI.COOL_BLUE_COLOR;
+        cameraPanel.setTitle(UI.RENDER_HACKS_ICON, 'Camera Debug');
+
+        this.exposureSlider = new UI.Slider();
+        this.exposureSlider.setRange(0, 250, 0.01);
+        this.exposureSlider.setLabel("Exposure: " + this.exposureSlider.getValue());
+        this.exposureSlider.setValue(2.2);
+        this.exposureSlider.onvalue = () => {
+            this.exposureSlider.setLabel("Exposure: " + this.exposureSlider.getValue());
+            this.exposure = this.exposureSlider.getValue();
+            this.updateExposureTexture();
+        };
+        cameraPanel.contents.appendChild(this.exposureSlider.elem);
+
+        this.enableHDR = new UI.Checkbox("Enable HDR");
+        this.enableHDR.checked = false;
+        cameraPanel.contents.appendChild(this.enableHDR.elem);
+
+        return [cameraPanel, layersPanel];
     }
 
     private prepareToRender(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): void {
@@ -1487,7 +1521,7 @@ export class BasicFRESRenderer {
     }
 
     private renderHdrCompose(device: GfxDevice, builder: any, hdrColorTargetID: GfxrRenderTargetID, viewerInput: Viewer.ViewerRenderInput): GfxrRenderTargetID {
-        if (!this.enableHDR) {
+        if (!this.enableHDR.checked) {
             return hdrColorTargetID;
         }
 
@@ -1562,7 +1596,7 @@ export class BasicFRESRenderer {
         const builder = this.renderHelper.renderGraph.newGraphBuilder();
 
         const hdrColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
-        if (this.enableHDR)
+        if (this.enableHDR.checked)
             hdrColorDesc.pixelFormat = GfxFormat.F16_RGBA;
         else
             hdrColorDesc.pixelFormat = viewerInput.onscreenTexture.pixelFormat;
