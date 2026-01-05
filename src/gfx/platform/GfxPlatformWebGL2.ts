@@ -410,6 +410,7 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
     private _EXT_texture_compression_bptc: EXT_texture_compression_bptc | null = null;
     private _EXT_texture_filter_anisotropic: EXT_texture_filter_anisotropic | null = null;
     private _EXT_texture_norm16: EXT_texture_norm16 | null = null;
+    private _EXT_color_buffer_float: EXT_color_buffer_float | null = null;
     private _KHR_parallel_shader_compile: KHR_parallel_shader_compile | null = null;
     private _OES_draw_buffers_indexed: OES_draw_buffers_indexed | null = null;
     private _OES_texture_float_linear: OES_texture_float_linear | null = null;
@@ -496,6 +497,7 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
         this._EXT_texture_compression_bptc = gl.getExtension('EXT_texture_compression_bptc');
         this._EXT_texture_filter_anisotropic = gl.getExtension('EXT_texture_filter_anisotropic');
         this._EXT_texture_norm16 = gl.getExtension('EXT_texture_norm16');
+        this._EXT_color_buffer_float = gl.getExtension('EXT_color_buffer_float');
         this._KHR_parallel_shader_compile = gl.getExtension('KHR_parallel_shader_compile');
         this._OES_texture_float_linear = gl.getExtension('OES_texture_float_linear');
         this._OES_texture_half_float_linear = gl.getExtension('OES_texture_half_float_linear');

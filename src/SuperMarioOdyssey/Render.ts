@@ -34,6 +34,7 @@ import { OdysseyProgram } from './OdysseyProgram.js';
 import { RenderMaterial } from './Shaders/RenderMaterial.js';
 import { RenderSky } from './Shaders/RenderSky.js';
 import { fillHdrComposeUniforms, HdrCompose } from './Shaders/HdrCompose.js';
+import { RenderCloudLayer } from './Shaders/RenderCloudLayer.js';
 
 export class BRTITextureHolder extends TextureHolder {
     public addFRESTextures(device: GfxDevice, fres: FRES): void {
@@ -351,6 +352,20 @@ class MaterialParams {
     public stain_rate = 1.0;
 }
 
+class CloudMaterialParams {
+    public uPhaseK: number = 0.0;
+    public uPhaseKBack: number = 0.0;
+    public uIsoRate: number = 0.0;
+    public uDiffuseScatterRatePow: number = 0.0;
+    public WrapCoef: vec2 = vec2.create();
+    public cIndirectScale: vec2 = vec2.create();
+    public albedo: vec4 = vec4.create();
+    public cTexMtxAlbedo0:   Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+    public cTexMtxNormal0:   Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+    public cTexMtxIndirect0: Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+    public cTexMtxIndirect1: Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+}
+
 class ModelAdditionalInfo {
     public model_alpha_mask = 1.0;
     public normal_axis_x_scale = 1.0;
@@ -364,6 +379,8 @@ class ModelAdditionalInfo {
 export function createProgramForMaterial(fmat: FMAT): OdysseyProgram {
     if (fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
         return new RenderSky(fmat);
+    } else if (fmat.shaderAssign.shaderArchiveName === 'alRenderCloudLayer') {
+        return new RenderCloudLayer(fmat);
     } else {
         return new RenderMaterial(fmat);
     }
@@ -452,7 +469,7 @@ class FMATInstance {
     private program: OdysseyProgram;
     private gfxProgram: GfxProgram;
     private megaStateFlags: Partial<GfxMegaStateDescriptor>;
-    private materialParams = new MaterialParams();
+    private materialParams: MaterialParams | CloudMaterialParams = new MaterialParams();
 
     constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, public fmat: FMAT) {
         this.program = createProgramForMaterial(fmat);
@@ -460,7 +477,7 @@ class FMATInstance {
         // Fill in our texture mappings.
         assert(fmat.samplerInfo.length === fmat.textureName.length);
 
-        this.textureMapping = nArray(11, () => new TextureMapping());
+        this.textureMapping = nArray(12, () => new TextureMapping());
         for (let i = 0; i < fmat.samplerInfo.length; i++) {
             const samplerInfo = fmat.samplerInfo[i];
             const gfxSampler = cache.createSampler({
@@ -505,6 +522,9 @@ class FMATInstance {
         textureHolder.fillTextureMapping(this.textureMapping[OdysseyProgram._lut0], "LUT");
         this.textureMapping[OdysseyProgram._lut0].gfxSampler = lutSampler;
 
+        textureHolder.fillTextureMapping(this.textureMapping[OdysseyProgram._e0], "Exposure");
+        this.textureMapping[OdysseyProgram._e0].gfxSampler = lutSampler;
+
         this.gfxProgram = cache.createProgram(this.program);
 
         const isTranslucent = (this.program instanceof RenderMaterial) ? this.program.isTranslucent : false;
@@ -515,20 +535,36 @@ class FMATInstance {
                 depthCompare:   GfxCompareMode.Always,
                 depthWrite:     false,
             };
+            setAttachmentStateSimple(this.megaStateFlags, {
+                blendMode: GfxBlendMode.Add,
+                blendSrcFactor: GfxBlendFactor.One,
+                blendDstFactor: GfxBlendFactor.Zero,
+            });
+        } else if (fmat.shaderAssign.shaderArchiveName === 'alRenderCloudLayer') {
+            this.megaStateFlags = {
+                cullMode:       GfxCullMode.None,
+                depthCompare:   GfxCompareMode.Greater,
+                depthWrite:     false,
+            };
+            setAttachmentStateSimple(this.megaStateFlags, {
+                blendMode: GfxBlendMode.Add,
+                blendSrcFactor: GfxBlendFactor.SrcAlpha,
+                blendDstFactor: GfxBlendFactor.OneMinusSrcAlpha,
+            });
+            this.parseCloudMaterialParams(fmat);
         } else {
             this.megaStateFlags = {
                 cullMode:       translateCullMode(fmat),
                 depthCompare:   reverseDepthForCompareMode(translateDepthCompare(fmat)),
                 depthWrite:     isTranslucent ? false : translateDepthWrite(fmat),
             };
+            setAttachmentStateSimple(this.megaStateFlags, {
+                blendMode: GfxBlendMode.Add,
+                blendSrcFactor: isTranslucent ? translateBlendSrcFactor(fmat) : GfxBlendFactor.One,
+                blendDstFactor: isTranslucent ? translateBlendDstFactor(fmat) : GfxBlendFactor.Zero,
+            });
+            this.parseMaterialParams(fmat);
         }
-        setAttachmentStateSimple(this.megaStateFlags, {
-            blendMode: GfxBlendMode.Add,
-            blendSrcFactor: isTranslucent ? translateBlendSrcFactor(fmat) : GfxBlendFactor.One,
-            blendDstFactor: isTranslucent ? translateBlendDstFactor(fmat) : GfxBlendFactor.Zero,
-        });
-
-        this.parseMaterialParams(fmat);
     }
 
     // TODO: include material uniforms
@@ -547,6 +583,7 @@ class FMATInstance {
 
     private parseMaterialParams(fmat: FMAT): void {
         const params = fmat.shaderParam;
+        const materialParams = new MaterialParams();
 
         for (const p of params) {
             switch (p.name) {
@@ -582,17 +619,17 @@ class FMATInstance {
                 case 'material_lod_roughness':
                 case 'alpha_test_value':
                 case 'material_lod_metalness':
-                    this.materialParams[p.name] = parseFMAT_ShaderParam_Float(p);
+                    materialParams[p.name] = parseFMAT_ShaderParam_Float(p);
                     break;
 
                 case 'indirect1_scale':
-                    if (!this.materialParams[p.name]) this.materialParams[p.name] = vec2.create();
-                    parseFMAT_ShaderParam_Float2(this.materialParams[p.name], p);
+                    if (!materialParams[p.name]) materialParams[p.name] = vec2.create();
+                    parseFMAT_ShaderParam_Float2(materialParams[p.name], p);
                     break;
 
                 case 'proc_texture_3d_scale':
-                    if (!this.materialParams[p.name]) this.materialParams[p.name] = vec3.create();
-                    parseFMAT_ShaderParam_Float3(this.materialParams[p.name], p);
+                    if (!materialParams[p.name]) materialParams[p.name] = vec3.create();
+                    parseFMAT_ShaderParam_Float3(materialParams[p.name], p);
                     break;
 
                 case 'const_color0':
@@ -613,16 +650,16 @@ class FMATInstance {
                 case 'stain_color':
                 case 'displacement_color':
                 case 'Flow0_param':
-                    if (!this.materialParams[p.name]) this.materialParams[p.name] = vec4.create();
-                    parseFMAT_ShaderParam_Float4(this.materialParams[p.name], p);
+                    if (!materialParams[p.name]) materialParams[p.name] = vec4.create();
+                    parseFMAT_ShaderParam_Float4(materialParams[p.name], p);
                     break;
 
                 case 'tex_mtx0':
                 case 'tex_mtx1':
                 case 'tex_mtx2':
                 case 'tex_mtx3':
-                    if (!this.materialParams[p.name]) this.materialParams[p.name] = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
-                    parseFMAT_ShaderParam_Texsrt(this.materialParams[p.name], p);
+                    if (!materialParams[p.name]) materialParams[p.name] = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+                    parseFMAT_ShaderParam_Texsrt(materialParams[p.name], p);
                     break;
 
                 case 'mirror_view_proj':
@@ -634,106 +671,174 @@ class FMATInstance {
                     break;
             }
         }
+        this.materialParams = materialParams;
+    }
+
+    private parseCloudMaterialParams(fmat: FMAT): void {
+        const params = fmat.shaderParam;
+        const materialParams = new CloudMaterialParams();
+
+        for (const p of params) {
+            switch (p.name) {
+                case 'uPhaseK':
+                case 'uPhaseKBack':
+                case 'uIsoRate':
+                case 'uDiffuseScatterRatePow':
+                    materialParams[p.name] = parseFMAT_ShaderParam_Float(p);
+                    break;
+
+                case 'WrapCoef':
+                case 'cIndirectScale':
+                    if (!materialParams[p.name]) materialParams[p.name] = vec2.create();
+                    parseFMAT_ShaderParam_Float2(materialParams[p.name], p);
+                    break;
+
+                case 'albedo':
+                    if (!materialParams[p.name]) materialParams[p.name] = vec4.create();
+                    parseFMAT_ShaderParam_Float4(materialParams[p.name], p);
+                    break;
+
+                case 'cTexMtxAlbedo0':
+                case 'cTexMtxNormal0':
+                case 'cTexMtxIndirect0':
+                case 'cTexMtxIndirect1':
+                    if (!materialParams[p.name]) materialParams[p.name] = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+                    parseFMAT_ShaderParam_Texsrt(materialParams[p.name], p);
+                    break;
+
+                default:
+                    // console.warn(`Unknown material parameter: ${p.name}`);
+                    break;
+            }
+        }
+        this.materialParams = materialParams;
     }
 
     public fillMaterialParams(d: Float32Array, offs: number): number {
-        offs += fillVec4(d, offs, this.materialParams.const_color0);
-        offs += fillVec4(d, offs, this.materialParams.const_color1);
-        offs += fillVec4(d, offs, this.materialParams.const_color2);
-        offs += fillVec4(d, offs, this.materialParams.const_color3);
+        const materialParams = this.materialParams as MaterialParams;
+        offs += fillVec4(d, offs, materialParams.const_color0);
+        offs += fillVec4(d, offs, materialParams.const_color1);
+        offs += fillVec4(d, offs, materialParams.const_color2);
+        offs += fillVec4(d, offs, materialParams.const_color3);
         
-        d[offs++] = this.materialParams.const_single0;
-        d[offs++] = this.materialParams.const_single1;
-        d[offs++] = this.materialParams.const_single2;
-        d[offs++] = this.materialParams.const_single3;
+        d[offs++] = materialParams.const_single0;
+        d[offs++] = materialParams.const_single1;
+        d[offs++] = materialParams.const_single2;
+        d[offs++] = materialParams.const_single3;
         
         // mul colors
-        offs += fillVec4(d, offs, this.materialParams.base_color_mul_color);
-        offs += fillVec4(d, offs, this.materialParams.uniform0_mul_color);
-        offs += fillVec4(d, offs, this.materialParams.uniform1_mul_color);
-        offs += fillVec4(d, offs, this.materialParams.uniform2_mul_color);
-        offs += fillVec4(d, offs, this.materialParams.uniform3_mul_color);
-        offs += fillVec4(d, offs, this.materialParams.uniform4_mul_color);
-        offs += fillVec4(d, offs, this.materialParams.proc_texture_2d_mul_color);
-        offs += fillVec4(d, offs, this.materialParams.proc_texture_3d_mul_color);
+        offs += fillVec4(d, offs, materialParams.base_color_mul_color);
+        offs += fillVec4(d, offs, materialParams.uniform0_mul_color);
+        offs += fillVec4(d, offs, materialParams.uniform1_mul_color);
+        offs += fillVec4(d, offs, materialParams.uniform2_mul_color);
+        offs += fillVec4(d, offs, materialParams.uniform3_mul_color);
+        offs += fillVec4(d, offs, materialParams.uniform4_mul_color);
+        offs += fillVec4(d, offs, materialParams.proc_texture_2d_mul_color);
+        offs += fillVec4(d, offs, materialParams.proc_texture_3d_mul_color);
         
         // texture matrices (mat2x4 = 2 vec4s)
-        offs += fillTexsrtAsMatrix2x4(d, offs, this.materialParams.tex_mtx0);
-        offs += fillTexsrtAsMatrix2x4(d, offs, this.materialParams.tex_mtx1);
-        offs += fillTexsrtAsMatrix2x4(d, offs, this.materialParams.tex_mtx2);
-        offs += fillTexsrtAsMatrix2x4(d, offs, this.materialParams.tex_mtx3);
+        offs += fillTexsrtAsMatrix2x4(d, offs, materialParams.tex_mtx0);
+        offs += fillTexsrtAsMatrix2x4(d, offs, materialParams.tex_mtx1);
+        offs += fillTexsrtAsMatrix2x4(d, offs, materialParams.tex_mtx2);
+        offs += fillTexsrtAsMatrix2x4(d, offs, materialParams.tex_mtx3);
         
-        d[offs++] = this.materialParams.displacement_scale;
-        d[offs++] = this.materialParams.displacement1_scale;
+        d[offs++] = materialParams.displacement_scale;
+        d[offs++] = materialParams.displacement1_scale;
         offs += 2; // padding
         
-        offs += fillVec4(d, offs, this.materialParams.displacement_color);
-        offs += fillVec4(d, offs, this.materialParams.displacement1_color);
+        offs += fillVec4(d, offs, materialParams.displacement_color);
+        offs += fillVec4(d, offs, materialParams.displacement1_color);
         
-        d[offs++] = this.materialParams.wrap_coef;
-        d[offs++] = this.materialParams.refract_thickness;
+        d[offs++] = materialParams.wrap_coef;
+        d[offs++] = materialParams.refract_thickness;
 
         // indirect0_scale
         d[offs++] = 0.0;
         d[offs++] = 0.0;
         
         // indirect1_scale (vec2)
-        d[offs++] = this.materialParams.indirect1_scale[0];
-        d[offs++] = this.materialParams.indirect1_scale[1];
+        d[offs++] = materialParams.indirect1_scale[0];
+        d[offs++] = materialParams.indirect1_scale[1];
         
-        d[offs++] = this.materialParams.alpha_test_value;
-        d[offs++] = this.materialParams.force_roughness;
+        d[offs++] = materialParams.alpha_test_value;
+        d[offs++] = materialParams.force_roughness;
         
-        d[offs++] = this.materialParams.sphere_rate_color0;
-        d[offs++] = this.materialParams.sphere_rate_color1;
-        d[offs++] = this.materialParams.sphere_rate_color2;
-        d[offs++] = this.materialParams.sphere_rate_color3;
+        d[offs++] = materialParams.sphere_rate_color0;
+        d[offs++] = materialParams.sphere_rate_color1;
+        d[offs++] = materialParams.sphere_rate_color2;
+        d[offs++] = materialParams.sphere_rate_color3;
         
         // mirror_view_proj
         for (let i = 0; i < 16; i++) {
             d[offs++] = 0.0; // TODO: figure out mirror_view_proj
         }
         
-        d[offs++] = this.materialParams.decal_range;
-        d[offs++] = this.materialParams.gbuf_fetch_offset;
-        d[offs++] = this.materialParams.translucence_sharpness;
-        d[offs++] = this.materialParams.translucence_sharpness_strength;
+        d[offs++] = materialParams.decal_range;
+        d[offs++] = materialParams.gbuf_fetch_offset;
+        d[offs++] = materialParams.translucence_sharpness;
+        d[offs++] = materialParams.translucence_sharpness_strength;
         
-        d[offs++] = this.materialParams.translucence_factor;
-        d[offs++] = this.materialParams.translucence_silhouette_stress;
-        d[offs++] = this.materialParams.indirect_depth_scale;
-        d[offs++] = this.materialParams.cloth_nov_peak_pos0;
-        d[offs++] = this.materialParams.cloth_nov_peak_pow0;
-        d[offs++] = this.materialParams.cloth_nov_tone_intensity0;
-        d[offs++] = this.materialParams.cloth_nov_tone_pow0;
-        d[offs++] = this.materialParams.cloth_nov_slope0;
+        d[offs++] = materialParams.translucence_factor;
+        d[offs++] = materialParams.translucence_silhouette_stress;
+        d[offs++] = materialParams.indirect_depth_scale;
+        d[offs++] = materialParams.cloth_nov_peak_pos0;
+        d[offs++] = materialParams.cloth_nov_peak_pow0;
+        d[offs++] = materialParams.cloth_nov_tone_intensity0;
+        d[offs++] = materialParams.cloth_nov_tone_pow0;
+        d[offs++] = materialParams.cloth_nov_slope0;
         
-        d[offs++] = this.materialParams.cloth_nov_emission_scale0;
+        d[offs++] = materialParams.cloth_nov_emission_scale0;
         
         // cloth_nov_noise_mask_scale0 (vec3)
-        d[offs++] = this.materialParams.cloth_nov_noise_mask_scale0;
+        d[offs++] = materialParams.cloth_nov_noise_mask_scale0;
         d[offs++] = 0.0;
         d[offs++] = 0.0;
         
         // proc_texture_3d_scale (vec4, but vec3 in shader params)
-        d[offs++] = this.materialParams.proc_texture_3d_scale[0];
-        d[offs++] = this.materialParams.proc_texture_3d_scale[1];
-        d[offs++] = this.materialParams.proc_texture_3d_scale[2];
+        d[offs++] = materialParams.proc_texture_3d_scale[0];
+        d[offs++] = materialParams.proc_texture_3d_scale[1];
+        d[offs++] = materialParams.proc_texture_3d_scale[2];
         d[offs++] = 1.0;
         
         // flow0_param?
         
-        offs += fillVec4(d, offs, this.materialParams.ripple_emission_color);
-        offs += fillVec4(d, offs, this.materialParams.hack_color);
-        offs += fillVec4(d, offs, this.materialParams.stain_color);
+        offs += fillVec4(d, offs, materialParams.ripple_emission_color);
+        offs += fillVec4(d, offs, materialParams.hack_color);
+        offs += fillVec4(d, offs, materialParams.stain_color);
         
-        d[offs++] = this.materialParams.stain_uv_scale;
-        d[offs++] = this.materialParams.stain_rate;
-        d[offs++] = this.materialParams.material_lod_roughness;
-        d[offs++] = this.materialParams.material_lod_metalness;
+        d[offs++] = materialParams.stain_uv_scale;
+        d[offs++] = materialParams.stain_rate;
+        d[offs++] = materialParams.material_lod_roughness;
+        d[offs++] = materialParams.material_lod_metalness;
         
         return offs;
     }
+
+    public fillCloudMaterialParams(d: Float32Array, offs: number): number {
+        const cloudMaterialParams = this.materialParams as CloudMaterialParams;
+        d[offs++] = cloudMaterialParams.uPhaseK;
+        d[offs++] = cloudMaterialParams.uPhaseKBack;
+        d[offs++] = cloudMaterialParams.uIsoRate;
+        d[offs++] = cloudMaterialParams.uDiffuseScatterRatePow;
+
+        offs += fillVec2(d, offs, cloudMaterialParams.WrapCoef);
+        offs += fillVec2(d, offs, cloudMaterialParams.cIndirectScale);
+        offs += fillVec4(d, offs, cloudMaterialParams.albedo);
+
+        // texture matrices (mat2x4 = 2 vec4s)
+        offs += fillTexsrtAsMatrix2x4(d, offs, cloudMaterialParams.cTexMtxAlbedo0);
+        offs += fillTexsrtAsMatrix2x4(d, offs, cloudMaterialParams.cTexMtxNormal0);
+        offs += fillTexsrtAsMatrix2x4(d, offs, cloudMaterialParams.cTexMtxIndirect0);
+        offs += fillTexsrtAsMatrix2x4(d, offs, cloudMaterialParams.cTexMtxIndirect1);
+
+        return offs;
+    }
+}
+
+function fillVec2(d: Float32Array, offs: number, v: vec2): number {
+    d[offs++] = v[0];
+    d[offs++] = v[1];
+    return 2;
 }
 
 function fillVec4(d: Float32Array, offs: number, v: vec4): number {
@@ -1037,7 +1142,7 @@ class FSHPInstance {
         d[offs++] = lightDir[2];
         d[offs++] = 0.5; // LUT position
 
-        console.log(`Light Dir: (${lightDir[0].toFixed(3)}, ${lightDir[1].toFixed(3)}, ${lightDir[2].toFixed(3)})`);
+        // console.log(`Light Dir: (${lightDir[0].toFixed(3)}, ${lightDir[1].toFixed(3)}, ${lightDir[2].toFixed(3)})`);
 
         const viewMatrix = scratchMatrix;
         computeViewMatrix(viewMatrix, viewerInput.camera);
@@ -1163,10 +1268,16 @@ class FSHPInstance {
         const envData = template.mapUniformBufferF32(OdysseyProgram.ub_MdlEnvView);
         this.fillMdlEnvView(envData, mdlEnvOffs, viewerInput, modelMatrix);
          
-        // ub_Material
-        const matOffs = template.allocateUniformBuffer(OdysseyProgram.ub_Material, 200); // TODO: calculate right size
-        const matData = template.mapUniformBufferF32(OdysseyProgram.ub_Material);
-        this.fmatInstance.fillMaterialParams(matData, matOffs);
+        // ub_CloudMaterial
+        if (this.fmatInstance.fmat.shaderAssign.shaderArchiveName === 'alRenderCloudLayer') {
+            const matOffs = template.allocateUniformBuffer(OdysseyProgram.ub_Material, 200); // TODO: calculate right size
+            const matData = template.mapUniformBufferF32(OdysseyProgram.ub_Material);
+            this.fmatInstance.fillCloudMaterialParams(matData, matOffs);
+        } else { // ub_Material
+            const matOffs = template.allocateUniformBuffer(OdysseyProgram.ub_Material, 200); // TODO: calculate right size
+            const matData = template.mapUniformBufferF32(OdysseyProgram.ub_Material);
+            this.fmatInstance.fillMaterialParams(matData, matOffs);
+        }
  
         // ub_ModelAdditionalInfo
         template.allocateUniformBuffer(OdysseyProgram.ub_ModelAdditionalInfo, 16 + 16 + 8 + 64 + 64 + 64 + 64 + 16 + 16);
@@ -1187,7 +1298,7 @@ class FSHPInstance {
 }
 
 const bindingLayouts: GfxBindingLayoutDescriptor[] = [
-    { numUniformBuffers: 4, numSamplers: 10, samplerEntries: [
+    { numUniformBuffers: 4, numSamplers: 11, samplerEntries: [
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
@@ -1197,6 +1308,7 @@ const bindingLayouts: GfxBindingLayoutDescriptor[] = [
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
         { dimension: GfxTextureDimension.Cube, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.UnfilterableFloat, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.UnfilterableFloat, },
     ] }
 ];
@@ -1252,7 +1364,7 @@ export class SkyRenderer extends FMDLRenderer {
         for (let i = 0; i < this.fshpInst.length; i++) {
             this.fshpInst[i].enableCulling = false;
 
-            // HACK: Moons get culled out after rotation, this bypasses it
+            // HACK: Additional objects in the sky model get culled out after rotation, this bypasses it
             const meshData = this.fshpInst[i].lodMeshInstances[0].meshData;
             meshData.mesh.bbox.min[0] = -1000000;
             meshData.mesh.bbox.min[1] = -1000000;
@@ -1296,8 +1408,8 @@ export class BasicFRESRenderer {
     private fullscreenInputLayout: GfxInputLayout | null = null;
 
     // HDR settings
-    public exposure = 18.2;
-    public enableHDR = true;
+    public exposure = 2.2;
+    public enableHDR = false;
 
     constructor(device: GfxDevice, public textureHolder: BRTITextureHolder) {
         this.renderHelper = new GfxRenderHelper(device);
@@ -1306,7 +1418,7 @@ export class BasicFRESRenderer {
         this.hdrComposeGfxProgram = this.renderHelper.renderCache.createProgram(this.hdrComposeProgram);
         
         this.createFullscreenQuad(device);
-        this.createExposureTexture(device);
+        this.createExposureTexture(device, textureHolder);
     }
 
     private createFullscreenQuad(device: GfxDevice): void {
@@ -1334,11 +1446,18 @@ export class BasicFRESRenderer {
         });
     }
 
-    private createExposureTexture(device: GfxDevice): void {
+    private createExposureTexture(device: GfxDevice, textureHolder: BRTITextureHolder): void {
         // 1x1 texture
         this.exposureTexture = device.createTexture(makeTextureDescriptor2D(GfxFormat.F32_RGBA, 1, 1, 1));
         const exposureData = new Float32Array([this.exposure, this.exposure, this.exposure, this.exposure]);
         device.uploadTextureData(this.exposureTexture, 0, [exposureData]);
+        
+        const name = "Exposure";
+        textureHolder.gfxTextures.push(this.exposureTexture);
+        // TODO: Fill viewer texture with data
+        const viewerTexture: Viewer.Texture = { name, surfaces: [], extraInfo: new Map([['Format', 'F32_RGBA']]) };
+        textureHolder.viewerTextures.push(viewerTexture);
+        textureHolder.textureNames.push(name);
     }
 
     public createPanels(): UI.Panel[] {
@@ -1443,7 +1562,10 @@ export class BasicFRESRenderer {
         const builder = this.renderHelper.renderGraph.newGraphBuilder();
 
         const hdrColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
-        // hdrColorDesc.pixelFormat = GfxFormat.F16_RGBA;
+        if (this.enableHDR)
+            hdrColorDesc.pixelFormat = GfxFormat.F16_RGBA;
+        else
+            hdrColorDesc.pixelFormat = viewerInput.onscreenTexture.pixelFormat;
         
         const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, viewerInput, standardFullClearRenderPassDescriptor);
 

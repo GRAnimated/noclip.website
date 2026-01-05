@@ -298,8 +298,11 @@ export function fillHdrComposeUniforms(d: Float32Array, offs: number, preset: Gr
     d[offs++] = 0.0;
 
     // TEMP
-    const toeCoeff = vec4.fromValues(0.5, 0.5, 0.5, 0.5);
-    const shoulderCoeff = vec4.fromValues(0.5, 0.5, 0.5, 0.5);
+    // x/y: scale, z/w: offset
+    const toeCoeff = vec4.fromValues(0.5, 0.5, 0.0, 0.0);
+
+    // x/y: scale, z/w: offset
+    const shoulderCoeff = vec4.fromValues(1.0, 1.0, -0.1, 0.85);
     
     // uToeCoeff (vec4)
     d[offs++] = toeCoeff[0];

@@ -112,7 +112,7 @@ class ResourceSystem {
     }
 }
 
-type StageMap = { ObjectList?: StageObject[], ZoneList?: StageObject[] }[];
+type StageMap = { ObjectList?: StageObject[], ZoneList?: StageObject[], SkyList?: StageObject[] }[];
 type Vector = { X: number, Y: number, Z: number };
 type StageObject = {
     UnitConfigName: string,
@@ -287,6 +287,10 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
             if (entry.ZoneList !== undefined)
                 for (let i = 0; i < entry.ZoneList.length; i++)
                     resourceSystem.fetchData(device, dataFetcher, `StageData/${entry.ZoneList[i].UnitConfigName}Map`);
+            if (entry.SkyList !== undefined)
+                for (let i = 0; i < entry.SkyList.length; i++) {
+                    resourceSystem.fetchData(device, dataFetcher, `ObjectData/${entry.SkyList[i].UnitConfigName}`); // Clouds
+                }
             if (graphicsPreset) {
                 resourceSystem.fetchData(device, dataFetcher, `ObjectData/${graphicsPreset.Sky.Name}`);
             }
@@ -334,6 +338,20 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                     calcModelMtxFromTRSVectors(zonePlacement, zoneEntry.Translate, zoneEntry.Rotate, zoneEntry.Scale);
                     mat4.mul(zonePlacement, placement, zonePlacement);
                     spawnZone(`${zoneEntry.UnitConfigName}`, zonePlacement);
+                }
+            }
+
+            if (entry.SkyList !== undefined) {
+                for (let i = 0; i < entry.SkyList.length; i++) {
+                    const skyEntry = entry.SkyList[i];
+                    const fmdlData = resourceSystem.getFMDLData(device, `ObjectData/${skyEntry.UnitConfigName}`);
+                    if (fmdlData === null)
+                        continue;
+
+                    const fmdlRenderer = new FMDLRenderer(device, cache, resourceSystem.textureHolder, fmdlData);
+                    calcModelMtxFromTRSVectors(fmdlRenderer.modelMatrix, skyEntry.Translate, skyEntry.Rotate, skyEntry.Scale);
+                    mat4.mul(fmdlRenderer.modelMatrix, placement, fmdlRenderer.modelMatrix);
+                    sceneRenderer.fmdlRenderers.push(fmdlRenderer);
                 }
             }
         };

@@ -1,5 +1,5 @@
 import { FMAT } from "../../fres_nx/bfres.js";
-import { OdysseyProgram } from "../OdysseyProgram.js";
+import { MaterialUniforms, OdysseyProgram, ubMaterial, ubMdlEnvView, ubModelAdditionalInfo, ubShapeParams } from "../OdysseyProgram.js";
 import { generateShaderUtil } from "./ShaderUtil.js";
 
 export class RenderSky extends OdysseyProgram {
@@ -7,16 +7,11 @@ export class RenderSky extends OdysseyProgram {
         super(fmat);
    
 this.both += `
-uniform sampler2D u_Texture0;
-uniform sampler2D u_Texture1;
-uniform sampler2D u_Texture2;
-uniform sampler2D u_Texture3;
-uniform sampler2D u_Texture4;
-uniform sampler2D u_Texture5;
-uniform sampler2D u_Texture6;
-uniform sampler2D u_Texture7;
-uniform samplerCube u_CubemapTexture0;
-uniform sampler2D u_DirectionalLightLUT;
+${ubShapeParams}
+${ubMdlEnvView}
+${ubMaterial}
+${ubModelAdditionalInfo}
+${MaterialUniforms}
 `;
 
 this.frag =

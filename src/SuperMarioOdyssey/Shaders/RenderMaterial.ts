@@ -1,6 +1,6 @@
 import { FMAT } from "../../fres_nx/bfres.js";
 import { assert } from "../../util.js";
-import { OdysseyProgram } from "../OdysseyProgram.js";
+import { MaterialUniforms, OdysseyProgram, ubMaterial, ubMdlEnvView, ubModelAdditionalInfo, ubShapeParams } from "../OdysseyProgram.js";
 import { generateFogCode } from "./FogUtil.js";
 import { generateShaderUtil } from "./ShaderUtil.js";
 
@@ -23,16 +23,11 @@ export class RenderMaterial extends OdysseyProgram {
         this.isTranslucent = alphaIsTranslucent && !this.getShaderOptionBoolean(`enable_alphamask`);
 
 this.both += `
-uniform sampler2D u_Texture0;
-uniform sampler2D u_Texture1;
-uniform sampler2D u_Texture2;
-uniform sampler2D u_Texture3;
-uniform sampler2D u_Texture4;
-uniform sampler2D u_Texture5;
-uniform sampler2D u_Texture6;
-uniform sampler2D u_Texture7;
-uniform samplerCube u_CubemapTexture0;
-uniform sampler2D u_DirectionalLightLUT;
+${ubShapeParams}
+${ubMdlEnvView}
+${ubMaterial}
+${ubModelAdditionalInfo}
+${MaterialUniforms}
 
 const float ENCODE_BASE	= 0.25;
 
@@ -262,9 +257,9 @@ vec4 CalculateBaseColor(vec2 tex_bias)
     if (${this.getShaderOptionBoolean('enable_base_color_mul_color')})
         basecolor_output *= mat.base_color_mul_color;
     if (${this.getShaderOptionNumber('vtxcolor_type') == 0}) // VTX_COLOR_TYPE_DIFFUSE
-        basecolor_output.rgb *= v_VtxColor.rgb;
+        basecolor_output.rgb *= clamp01(v_VtxColor.rgb); // NOTE: Reference doesn't clamp here
     else if (${this.getShaderOptionNumber('vtxcolor_type') == 3}) // VTX_COLOR_TYPE_DIFFUSE_BLEND
-       basecolor_output.rgb *= (1.0 - v_VtxColor.rgb * v_VtxColor.rgb);
+       basecolor_output.rgb *= clamp01(1.0 - v_VtxColor.rgb * v_VtxColor.rgb); // NOTE: Same here
 
     return basecolor_output;
 }
@@ -511,9 +506,8 @@ vec3 CalculateEmissionScale(vec3 emission, int scale_type, vec4 irradiance)
     }
     else if (scale_type == 7) // exposure scale    
     {   
-        // TODO: Need exposure texture 
-        // float exposure = texture(cExposureTexture, vec2(0.0, 0.0)).a;
-        // emission *= 1.0 / exposure * mdlEnvView.Exposure.x;
+        float exposure = texture(u_ExposureTexture, vec2(0.0, 0.0)).a;
+        emission *= 1.0 / exposure * mdlEnvView.cInvExposure;
     }
     return emission;
 }

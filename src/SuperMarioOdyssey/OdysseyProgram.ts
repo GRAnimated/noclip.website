@@ -4,13 +4,14 @@ import { DeviceProgram } from "../Program";
 import { assert, assertExists } from "../util";
 import { generateShaderUtil } from "./Shaders/ShaderUtil";
 
-
-const OdysseyGlobalDefinitions = `
+export const ubShapeParams = `
 layout(std140) uniform ub_ShapeParams {
     Mat4x4 u_Projection;
     Mat3x4 u_ModelView;
 };
+`;
 
+export const ubMdlEnvView = `
 layout(std140) uniform ub_MdlEnvView {
     float HDRTranslate_uHDRPower;     // moved here due to reduce the amount of uniform buffers
     float HDRTranslate_uDynamicRange;
@@ -52,7 +53,9 @@ layout(std140) uniform ub_MdlEnvView {
     vec3 cViewAxisZ;
     float _padding6;
 } mdlEnvView;
+`;
 
+export const ubMaterial = `
 layout(std140) uniform ub_Material {
     vec4 const_color0;
     vec4 const_color1;
@@ -114,7 +117,9 @@ layout(std140) uniform ub_Material {
     float material_lod_roughness;
     float material_lod_metalness;
 } mat;
+`;
 
+export const ubModelAdditionalInfo = `
 layout(std140) uniform ub_ModelAdditionalInfo {
     float model_alpha_mask;
     float normal_axis_x_scale;
@@ -128,6 +133,20 @@ layout(std140) uniform ub_ModelAdditionalInfo {
 } modelInfo;
 `;
 
+export const MaterialUniforms = `
+uniform sampler2D u_Texture0;
+uniform sampler2D u_Texture1;
+uniform sampler2D u_Texture2;
+uniform sampler2D u_Texture3;
+uniform sampler2D u_Texture4;
+uniform sampler2D u_Texture5;
+uniform sampler2D u_Texture6;
+uniform sampler2D u_Texture7;
+uniform samplerCube u_CubemapTexture0;
+uniform sampler2D u_DirectionalLightLUT;
+uniform sampler2D u_ExposureTexture;
+`;
+
 export class OdysseyProgram extends DeviceProgram {
     public static _p0: number = 0;
     public static _c0: number = 1;
@@ -139,7 +158,8 @@ export class OdysseyProgram extends DeviceProgram {
     public static _u3: number = 7;
     public static _m0: number = 8; // cubemap
     public static _lut0: number = 9; // cDirectionalLightColor
-    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3', '_m0', '_lut0' ];
+    public static _e0: number = 10; // exposure
+    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3', '_m0', '_lut0', '_e0' ];
 
     public static ub_ShapeParams = 0;
     public static ub_MdlEnvView = 1; // and ub_HDRTranslate
@@ -153,7 +173,7 @@ export class OdysseyProgram extends DeviceProgram {
         this.name = this.fmat.name;
     }
 
-    public override both = generateShaderUtil() + OdysseyGlobalDefinitions;
+    public override both = generateShaderUtil();
 
     public lookupSamplerIndex(shadingModelSamplerBindingName: string) {
         // Translate to a local sampler by looking in the sampler map, and then that's the index we use.
