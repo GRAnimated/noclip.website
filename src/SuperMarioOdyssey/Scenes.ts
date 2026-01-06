@@ -15,6 +15,8 @@ import { computeModelMatrixSRT, MathConstants } from '../MathHelpers.js';
 import { GfxRenderCache } from '../gfx/render/GfxRenderCache.js';
 
 const pathBase = `SuperMarioOdyssey`;
+const addon = `SuperMarioOdysseyMod`;
+const ENABLE_MODDED = false;
 
 class ResourceSystem {
     public textureHolder = new BRTITextureHolder();
@@ -47,7 +49,17 @@ class ResourceSystem {
     }
 
     private async fetchDataInternal(device: GfxDevice, dataFetcher: DataFetcher, arcPath: string): Promise<SARC.SARC | null> {
-        const buffer = await dataFetcher.fetchData(`${pathBase}/${arcPath}.szs`, { allow404: true });
+        let buffer: ArrayBufferSlice | null = null;
+        if (ENABLE_MODDED) {
+            try {
+            buffer = await dataFetcher.fetchData(`${addon}/${arcPath}.szs`, { allow404: true });
+            } catch {
+            // ignore
+            }
+        }
+        if (!buffer || buffer.byteLength === 0) {
+            buffer = await dataFetcher.fetchData(`${pathBase}/${arcPath}.szs`, { allow404: true });
+        }
 
         if (buffer.byteLength === 0)
             return null;
@@ -216,7 +228,7 @@ export class OdysseyRenderer extends BasicFRESRenderer {
 }
 
 export class OdysseySceneDesc implements Viewer.SceneDesc {
-    constructor(public id: string, public name: string = id) {
+    constructor(public id: string, public name: string = id, public scenarioIndex: number = 1) {
     }
 
     public async createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
@@ -236,71 +248,124 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
             return null;
         }
         const world = assertExists(findWorldFromStage(worldList, this.id));
-
+        
         const sceneRenderer = new OdysseyRenderer(device, resourceSystem);
         const cache = sceneRenderer.renderHelper.renderCache;
 
         resourceSystem.fetchData(device, dataFetcher, `ObjectData/${world.Name}Texture`);
 
-        const spawnZone = async (stageName: string, placement: mat4) => {
+        const spawnZone = async (stageName: string, placement: mat4, isMap: boolean) => {
+            console.log('Spawning stage:', stageName + (isMap ? ' (map)' : ''));
+
             const stageMapData = assertExists(await resourceSystem.fetchData(device, dataFetcher, `StageData/${stageName}Map`));
             const stageMap: StageMap = BYML.parse(assertExists(stageMapData.files.find((n) => n.name === `${stageName}Map.byml`)).buffer);
 
-            const stageDesignData = assertExists(await resourceSystem.fetchData(device, dataFetcher, `StageData/${stageName}Design`));
-            const stageDesign: GraphicsArea = BYML.parse(assertExists(stageDesignData.files.find((n) => n.name === `GraphicsArea.byml`)).buffer);
-
-            const scenarioNum = world.AfterEndingScenario;
-            // It seems like the scenarios are 1-indexed, and 0 means "default" (which appears to be 1).
-            const scenarioIndex = scenarioNum > 0 ? scenarioNum - 1 : 0;
+            let scenarioIndex: number;
+            if (this.scenarioIndex !== null && !Number.isNaN(this.scenarioIndex)) {
+                const maxIndex = stageMap.length > 0 ? stageMap.length - 1 : 0;
+                scenarioIndex = Math.max(0, Math.min(this.scenarioIndex, maxIndex));
+            } else {
+                const scenarioNum = world.AfterEndingScenario;
+                // It seems like the scenarios are 1-indexed, and 0 means "default" (which appears to be 1).
+                scenarioIndex = scenarioNum > 0 ? scenarioNum - 1 : 0;
+                const maxIndex = stageMap.length > 0 ? stageMap.length - 1 : 0;
+                scenarioIndex = Math.max(0, Math.min(scenarioIndex, maxIndex));
+            }
             const entry = stageMap[scenarioIndex];
 
-            let stageDesignParam = stageDesign.GraphicsAreaParamArray.find((e) => e.AreaName === "DefaultArea" && e.SuffixName === `Scenario${scenarioIndex + 1}`);
-            if (!stageDesignParam)
-                stageDesignParam = stageDesign.GraphicsAreaParamArray.find((e) => e.AreaName === "DefaultArea" && e.SuffixName === "");
-            
-            console.log('Stage Design:', stageDesignParam);
+            if (isMap) {
+                const stageDesignData = assertExists(await resourceSystem.fetchData(device, dataFetcher, `StageData/${stageName}Design`));
+                const stageDesign: GraphicsArea = BYML.parse(assertExists(stageDesignData.files.find((n) => n.name === `GraphicsArea.byml`)).buffer);
 
-            const presetName: string = String(stageDesignParam!.PresetName) === "Default" ? `CubeMap${stageName}` : String(stageDesignParam!.PresetName);
+                console.log(scenarioIndex);
 
-            const graphicsPresetSARC = await resourceSystem.fetchData(device, dataFetcher, `SystemData/GraphicsPreset`);
-            console.log('Graphics Preset:', graphicsPresetSARC);
-            let graphicsPreset: GraphicsPreset | null = null;
-            for (let i = 0; i < graphicsPresetSARC!.files.length; i++) {
-                const file = graphicsPresetSARC!.files[i];
-                const filePresetName: string = file.name.replace('.byml', '');
-                if (filePresetName === `${presetName}`) {
-                    console.log('Found Graphics Preset:', filePresetName);
-                    graphicsPreset = BYML.parse(file.buffer);
-                    break;
+                let stageDesignParam = stageDesign.GraphicsAreaParamArray[scenarioIndex - 1];
+                
+                if (stageDesignParam.AreaName === "") {
+                    stageDesignParam = stageDesign.GraphicsAreaParamArray[0];
+                }
+
+                console.log('Stage Design:', stageDesign);
+                console.log('Stage Design Param:', stageDesignParam);
+                
+                const cubeMapUnitName = stageDesignParam.CubeMapUnitName;
+                const suffixName = stageDesignParam.SuffixName;
+                const presetName = stageDesignParam.PresetName;
+
+                sceneRenderer.textureHolder.cubeMapSuffixName = suffixName;
+
+                const graphicsPresetSARC = await resourceSystem.fetchData(device, dataFetcher, `SystemData/GraphicsPreset`);
+                console.log('Graphics Preset:', graphicsPresetSARC);
+                let graphicsPreset: GraphicsPreset | null = null;
+                for (let i = 0; i < graphicsPresetSARC!.files.length; i++) {
+                    const file = graphicsPresetSARC!.files[i];
+                    const filePresetName: string = file.name.replace('.byml', '');
+                    if (filePresetName === `${presetName}`) {
+                        graphicsPreset = BYML.parse(file.buffer);
+                        break;
+                    }
+                }
+
+                console.log(graphicsPreset);
+
+                if (graphicsPreset) {
+                    sceneRenderer.setGraphicsPreset(graphicsPreset);
+                    resourceSystem.fetchData(device, dataFetcher, `ObjectData/${graphicsPreset.Sky.Name}`);
+
+                    await resourceSystem.waitForLoad();
+
+                    const skyFmdlData = resourceSystem.getFMDLData(device, `ObjectData/${graphicsPreset.Sky.Name}`);
+                    if (skyFmdlData !== null) {
+                        const skyRenderer = new SkyRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData);
+                        mat4.copy(skyRenderer.modelMatrix, placement);
+                        
+                        const preset = OdysseyRenderer.graphicsPreset!;
+                        const dir = latLonToDirection(preset.DirectionalLight.DirectionParam.Y, preset.DirectionalLight.DirectionParam.X);
+                        mat4.rotateY(skyRenderer.modelMatrix, skyRenderer.modelMatrix, (180 * MathConstants.DEG_TO_RAD) + dir.z);
+                        
+                        sceneRenderer.skyRenderers.push(skyRenderer);
+                    }
+
+                    const preset = OdysseyRenderer.graphicsPreset!;
+                    const color = preset.DirectionalLight.Color;
+                    const lightColor = { r: color.R, g: color.G, b: color.B, a: color.A * 255.0 };
+
+                    resourceSystem.textureHolder.addLUTTexture(device, 16, lightColor);
+                }
+
+                resourceSystem.fetchData(device, dataFetcher, `ObjectData/CubeMap${stageName}`);
+
+                if (entry.SkyList !== undefined) {
+                    for (let i = 0; i < entry.SkyList.length; i++) {
+                        resourceSystem.fetchData(device, dataFetcher, `ObjectData/${entry.SkyList[i].UnitConfigName}`); // Clouds
+                    }
+                }
+
+                await resourceSystem.waitForLoad();
+
+                if (entry.SkyList !== undefined) {
+                    for (let i = 0; i < entry.SkyList.length; i++) {
+                        const skyEntry = entry.SkyList[i];
+                        const fmdlData = resourceSystem.getFMDLData(device, `ObjectData/${skyEntry.UnitConfigName}`);
+                        if (fmdlData === null)
+                            continue;
+
+                        const fmdlRenderer = new FMDLRenderer(device, cache, resourceSystem.textureHolder, fmdlData);
+                        calcModelMtxFromTRSVectors(fmdlRenderer.modelMatrix, skyEntry.Translate, skyEntry.Rotate, skyEntry.Scale);
+                        mat4.mul(fmdlRenderer.modelMatrix, placement, fmdlRenderer.modelMatrix);
+                        sceneRenderer.fmdlRenderers.push(fmdlRenderer);
+                    }
                 }
             }
 
-            console.log(graphicsPreset);
-
-            if (graphicsPreset) {
-                sceneRenderer.setGraphicsPreset(graphicsPreset);
-            }
-
-            if (entry.ObjectList !== undefined)
+            if (entry.ObjectList !== undefined) {
                 for (let i = 0; i < entry.ObjectList.length; i++)
                     resourceSystem.fetchData(device, dataFetcher, `ObjectData/${entry.ObjectList[i].UnitConfigName}`);
-            if (entry.ZoneList !== undefined)
+            }
+            if (entry.ZoneList !== undefined) {
                 for (let i = 0; i < entry.ZoneList.length; i++)
                     resourceSystem.fetchData(device, dataFetcher, `StageData/${entry.ZoneList[i].UnitConfigName}Map`);
-            if (entry.SkyList !== undefined)
-                for (let i = 0; i < entry.SkyList.length; i++) {
-                    resourceSystem.fetchData(device, dataFetcher, `ObjectData/${entry.SkyList[i].UnitConfigName}`); // Clouds
-                }
-            if (graphicsPreset) {
-                resourceSystem.fetchData(device, dataFetcher, `ObjectData/${graphicsPreset.Sky.Name}`);
             }
-            resourceSystem.fetchData(device, dataFetcher, `ObjectData/CubeMap${stageName}`);
-
-            const preset = OdysseyRenderer.graphicsPreset!;
-            const color = preset.DirectionalLight.Color;
-            const lightColor = { r: color.R, g: color.G, b: color.B, a: color.A * 255.0 };
-
-            resourceSystem.textureHolder.addLUTTexture(device, 16, lightColor);
 
             await resourceSystem.waitForLoad();
 
@@ -316,47 +381,21 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                     mat4.mul(fmdlRenderer.modelMatrix, placement, fmdlRenderer.modelMatrix);
                     sceneRenderer.fmdlRenderers.push(fmdlRenderer);
                 }
-                if (graphicsPreset) {
-                    const skyFmdlData = resourceSystem.getFMDLData(device, `ObjectData/${graphicsPreset.Sky.Name}`);
-                    if (skyFmdlData !== null) {
-                        const skyRenderer = new SkyRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData);
-                        mat4.copy(skyRenderer.modelMatrix, placement);
-                        
-                        const preset = OdysseyRenderer.graphicsPreset!;
-                        const dir = latLonToDirection(preset.DirectionalLight.DirectionParam.Y, preset.DirectionalLight.DirectionParam.X);
-                        mat4.rotateY(skyRenderer.modelMatrix, skyRenderer.modelMatrix, (180 * MathConstants.DEG_TO_RAD) + dir.z);
-                        
-                        sceneRenderer.skyRenderers.push(skyRenderer);
-                    }
-                }
             }
 
             if (entry.ZoneList !== undefined) {
                 for (let i = 0; i < entry.ZoneList.length; i++) {
+                    console.log('Spawning zone:', entry.ZoneList[i].UnitConfigName);
                     const zoneEntry = entry.ZoneList[i];
                     const zonePlacement = mat4.create();
                     calcModelMtxFromTRSVectors(zonePlacement, zoneEntry.Translate, zoneEntry.Rotate, zoneEntry.Scale);
                     mat4.mul(zonePlacement, placement, zonePlacement);
-                    spawnZone(`${zoneEntry.UnitConfigName}`, zonePlacement);
-                }
-            }
-
-            if (entry.SkyList !== undefined) {
-                for (let i = 0; i < entry.SkyList.length; i++) {
-                    const skyEntry = entry.SkyList[i];
-                    const fmdlData = resourceSystem.getFMDLData(device, `ObjectData/${skyEntry.UnitConfigName}`);
-                    if (fmdlData === null)
-                        continue;
-
-                    const fmdlRenderer = new FMDLRenderer(device, cache, resourceSystem.textureHolder, fmdlData);
-                    calcModelMtxFromTRSVectors(fmdlRenderer.modelMatrix, skyEntry.Translate, skyEntry.Rotate, skyEntry.Scale);
-                    mat4.mul(fmdlRenderer.modelMatrix, placement, fmdlRenderer.modelMatrix);
-                    sceneRenderer.fmdlRenderers.push(fmdlRenderer);
+                    spawnZone(`${zoneEntry.UnitConfigName}`, zonePlacement, false);
                 }
             }
         };
 
-        await spawnZone(this.id, mat4.create());
+        await spawnZone(this.id, mat4.create(), true);
         await resourceSystem.waitForLoad();
 
         return sceneRenderer;
@@ -367,21 +406,42 @@ const name = "Super Mario Odyssey";
 const id = "smo";
 const sceneDescs = [
     "Cap Kingdom",
-    new OdysseySceneDesc("CapWorldHomeStage", "Cap Kingdom"),
+    new OdysseySceneDesc("CapWorldHomeStage", "Cap Kingdom - First Visit", 1),
+    new OdysseySceneDesc("CapWorldHomeStage", "Cap Kingdom - Revisit/Peace", 2),
+    new OdysseySceneDesc("CapWorldHomeStage", "Cap Kingdom - Post-game", 3),
+    new OdysseySceneDesc("CapWorldHomeStage", "Cap Kingdom - Moon Rock", 4),
+    new OdysseySceneDesc("CapWorldHomeStage", "Cap Kingdom - Balloon World", 5),
+    new OdysseySceneDesc("CapWorldHomeStage", "Cap Kingdom - KFR", 6),
+    new OdysseySceneDesc("CapWorldHomeStage", "Cap Kingdom - Trailer", 7),
     new OdysseySceneDesc("CapWorldTowerStage", "Cap Tower"),
     new OdysseySceneDesc("RollingExStage", "Rolling Sublevel"),
     new OdysseySceneDesc("PoisonWaveExStage", "Poison Tide Sublevel"),
     new OdysseySceneDesc("PushBlockExStage", "Push-Block Sublevel"),
     new OdysseySceneDesc("FrogSearchExStage", "Frog Pond Sublevel"),
+
     "Cascade Kingdom",
-    new OdysseySceneDesc("WaterfallWorldHomeStage", "Cascade Kingdom"),
+    new OdysseySceneDesc("WaterfallWorldHomeStage", "Cascade - First Visit", 1),
+    new OdysseySceneDesc("WaterfallWorldHomeStage", "Cascade - Revisit/Peace", 2),
+    new OdysseySceneDesc("WaterfallWorldHomeStage", "Cascade - Post-game", 3),
+    new OdysseySceneDesc("WaterfallWorldHomeStage", "Cascade - Moon Rock", 4),
+    new OdysseySceneDesc("WaterfallWorldHomeStage", "Cascade - KFR", 5),
+    new OdysseySceneDesc("WaterfallWorldHomeStage", "Cascade - Balloon World", 6),
+    new OdysseySceneDesc("WaterfallWorldHomeStage", "Cascade - E3/Trailer", 8),
     new OdysseySceneDesc("CapAppearExStage", "Mysterious Clouds Sublevel"),
     new OdysseySceneDesc("WanwanClashExStage", "Chain Chomp Cave Sublevel"),
     new OdysseySceneDesc("Lift2DExStage", "Chasm Lifts Sublevel"),
     new OdysseySceneDesc("WindBlowExStage", "Gusty Bridges Sublevel"),
     new OdysseySceneDesc("TrexPoppunExStage", "Dinosaur Nest Sublevel"),
+
     "Sand Kingdom",
-    new OdysseySceneDesc("SandWorldHomeStage", "Sand Kingdom"),
+    new OdysseySceneDesc("SandWorldHomeStage", "Sand - First Visit", 1),
+    new OdysseySceneDesc("SandWorldHomeStage", "Sand - Night", 2),
+    new OdysseySceneDesc("SandWorldHomeStage", "Sand - Peace", 3),
+    new OdysseySceneDesc("SandWorldHomeStage", "Sand - Post-game", 4),
+    new OdysseySceneDesc("SandWorldHomeStage", "Sand - Moon Rock", 5),
+    new OdysseySceneDesc("SandWorldHomeStage", "Sand - Balloon World", 6),
+    new OdysseySceneDesc("SandWorldHomeStage", "Sand - KFR", 7),
+    new OdysseySceneDesc("SandWorldHomeStage", "Sand - Kiosk Demo", 8),
     new OdysseySceneDesc("SandWorldMeganeExStage", "Invisible Maze Sublevel"),
     new OdysseySceneDesc("SandWorldSphinxExStage", "Jaxi Ruins Underground"),
     new OdysseySceneDesc("SandWorldUnderground000Stage", "Underground Temple"),
@@ -399,8 +459,15 @@ const sceneDescs = [
     new OdysseySceneDesc("RocketFlowerExStage", "Colossal Ruins Sublevel"),
     new OdysseySceneDesc("WaterTubeExStage", "Freezing Waterway Sublevel"),
     new OdysseySceneDesc("SandWorldVibrationStage", "Rumbling Floor Sublevel"),
+
     "Wooded Kingdom",
-    new OdysseySceneDesc("ForestWorldHomeStage", "Wooded Kingdom"),
+    new OdysseySceneDesc("ForestWorldHomeStage", "Wooded - First Visit", 1),
+    new OdysseySceneDesc("ForestWorldHomeStage", "Wooded - Post-Spewart", 2),
+    new OdysseySceneDesc("ForestWorldHomeStage", "Wooded - Peace", 3),
+    new OdysseySceneDesc("ForestWorldHomeStage", "Wooded - Post-game", 4),
+    new OdysseySceneDesc("ForestWorldHomeStage", "Wooded - Moon Rock", 5),
+    new OdysseySceneDesc("ForestWorldHomeStage", "Wooded - Balloon World", 6),
+    new OdysseySceneDesc("ForestWorldHomeStage", "Wooded - KFR", 7),
     new OdysseySceneDesc("ForestWorldTowerStage", "Sky Garden Tower"),
     new OdysseySceneDesc("ForestWorldWaterExStage", "Flooding Pipeway Sublevel"),
     new OdysseySceneDesc("ForestWorldCloudBonusExStage", "Cloud Lift Bonus Stage"),
@@ -415,24 +482,51 @@ const sceneDescs = [
     new OdysseySceneDesc("ForestWorldBonusStage", "Treasure Room"),
     new OdysseySceneDesc("ForestWorldWoodsCostumeStage", "Deep Woods (Treasure Chest Cave)"),
     new OdysseySceneDesc("KillerRoadExStage", "Breakdown Road Sublevel"),
+
     "Lake Kingdom",
-    new OdysseySceneDesc("LakeWorldHomeStage", "Lake Kingdom"),
+    new OdysseySceneDesc("LakeWorldHomeStage", "Lake - First Visit", 1),
+    new OdysseySceneDesc("LakeWorldHomeStage", "Lake - Peace", 2),
+    new OdysseySceneDesc("LakeWorldHomeStage", "Lake - Post-game", 3),
+    new OdysseySceneDesc("LakeWorldHomeStage", "Lake - Moon Rock", 4),
+    new OdysseySceneDesc("LakeWorldHomeStage", "Lake - KFR", 5),
+    new OdysseySceneDesc("LakeWorldHomeStage", "Lake - Balloon World", 6),
     new OdysseySceneDesc("LakeWorldShopStage", "Crazy Cap"),
     new OdysseySceneDesc("FrogPoisonExStage", "Waves of Poison Sublevel"),
     new OdysseySceneDesc("TrampolineWallCatchExStage", "Ledge Climbing Sublevel"),
     new OdysseySceneDesc("GotogotonExStage", "Puzzle Part Sublevel"),
     new OdysseySceneDesc("FastenerExStage", "Zipper Chasm Sublevel"),
+
     "Cloud Kingdom",
-    new OdysseySceneDesc("CloudWorldHomeStage", "Cloud Kingdom"),
+    new OdysseySceneDesc("CloudWorldHomeStage", "Cloud - First Visit", 1),
+    new OdysseySceneDesc("CloudWorldHomeStage", "Cloud - Revisit/Peace", 2),
+    new OdysseySceneDesc("CloudWorldHomeStage", "Cloud - Post-game", 3),
+    new OdysseySceneDesc("CloudWorldHomeStage", "Cloud - Moon Rock", 4),
+    new OdysseySceneDesc("CloudWorldHomeStage", "Cloud - KFR", 5),
+    new OdysseySceneDesc("CloudWorldHomeStage", "Cloud - Balloon World", 6),
     new OdysseySceneDesc("Cube2DExStage", "2D Cube Sublevel"),
     new OdysseySceneDesc("FukuwaraiKuriboStage", "Goomba Picture Match Sublevel"),
+
     "Lost Kingdom",
-    new OdysseySceneDesc("ClashWorldHomeStage", "Lost Kingdom"),
+    new OdysseySceneDesc("ClashWorldHomeStage", "Lost - First Visit", 1),
+    new OdysseySceneDesc("ClashWorldHomeStage", "Lost - Revisit/Peace", 2),
+    new OdysseySceneDesc("ClashWorldHomeStage", "Lost - Post-game", 3),
+    new OdysseySceneDesc("ClashWorldHomeStage", "Lost - Moon Rock", 4),
     new OdysseySceneDesc("ClashWorldShopStage", "Crazy Cap"),
     new OdysseySceneDesc("ImomuPoisonExStage", "Poison Geyser Sublevel"),
     new OdysseySceneDesc("JangoExStage", "Klepto Lava Pit Sublevel"),
+
     "Metro Kingdom",
-    new OdysseySceneDesc("CityWorldHomeStage", "Metro Kingdom"),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - Night", 1),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - Day", 2),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - Festival", 3),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - Peace", 4),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - Balloon World", 5),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - KFR", 6),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - Festival Revisit?", 7),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - Moon Rock", 8),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - KFR 2", 9),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - Morning Metro", 10),
+    new OdysseySceneDesc("CityWorldHomeStage", "Metro - 8-Bit Festival", 11),
     new OdysseySceneDesc("CityWorldShop01Stage", "Crazy Cap"),
     new OdysseySceneDesc("Note2D3DRoomExStage", "Private Room 2D Sublevel"),
     new OdysseySceneDesc("CityWorldFactoryStage", "New Donk City Power Plant"),
@@ -450,8 +544,14 @@ const sceneDescs = [
     new OdysseySceneDesc("DonsukeExStage", "Pitchblack Mountain Sublevel"),
     new OdysseySceneDesc("CityPeopleRoadStage", "Crowded Alleyway Sublevel"),
     new OdysseySceneDesc("TrexBikeExStage", "T-Rex Chase Sublevel"),
+
     "Seaside Kingdom",
-    new OdysseySceneDesc("SeaWorldHomeStage", "Seaside Kingdom"),
+    new OdysseySceneDesc("SeaWorldHomeStage", "Seaside - First Visit", 1),
+    new OdysseySceneDesc("SeaWorldHomeStage", "Seaside - Peace", 2),
+    new OdysseySceneDesc("SeaWorldHomeStage", "Seaside - Post-game", 3),
+    new OdysseySceneDesc("SeaWorldHomeStage", "Seaside - Moon Rock", 4),
+    new OdysseySceneDesc("SeaWorldHomeStage", "Seaside - KFR", 5),
+    new OdysseySceneDesc("SeaWorldHomeStage", "Seaside - Balloon World", 6),
     new OdysseySceneDesc("SeaWorldCostumeStage", "Beach House Costume Sublevel"),
     new OdysseySceneDesc("WaterValleyExStage", "Narrow Valley Sublevel"),
     new OdysseySceneDesc("SeaWorldSecretStage", "Sphynx's Underwater Vault"),
@@ -462,8 +562,14 @@ const sceneDescs = [
     new OdysseySceneDesc("SeaWorldSneakingManStage", "Flooded Cave Sublevel"),
     new OdysseySceneDesc("SeaWorldUtsuboCaveStage", "Underwater Tunnel Sublevel"),
     new OdysseySceneDesc("SeaWorldVibrationStage", "Rumbling Floor Sublevel"),
+
     "Snow Kingdom",
-    new OdysseySceneDesc("SnowWorldHomeStage", "Snow Kingdom"),
+    new OdysseySceneDesc("SnowWorldHomeStage", "Snow - First Visit", 1),
+    new OdysseySceneDesc("SnowWorldHomeStage", "Snow - Peace", 2),
+    new OdysseySceneDesc("SnowWorldHomeStage", "Snow - Post-game", 3),
+    new OdysseySceneDesc("SnowWorldHomeStage", "Snow - Moon Rock", 4),
+    new OdysseySceneDesc("SnowWorldHomeStage", "Snow - Balloon World", 5),
+    new OdysseySceneDesc("SnowWorldHomeStage", "Snow - KFR", 6),
     new OdysseySceneDesc("IceWaterBlockExStage", "Freezing Water Sublevel"),
     new OdysseySceneDesc("SnowWorldTownStage", "Shiveria Town"),
     new OdysseySceneDesc("ByugoPuzzleExStage", "Wooden Block Puzzle Sublevel"),
@@ -481,8 +587,18 @@ const sceneDescs = [
     new OdysseySceneDesc("SnowWorldShopStage", "Crazy Cap"),
     new OdysseySceneDesc("IceWalkerExStage", "Trace-Walking Cave Sublevel"),
     new OdysseySceneDesc("SnowWorldCostumeStage", "Cold Room Costume Sublevel"),
+
     "Luncheon Kingdom",
-    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon Kingdom"),
+    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon - First Visit", 1),
+    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon - Post-Meat", 2),
+    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon - Peace", 3),
+    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon - Post-game", 4),
+    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon - Volcano-less (1)", 5),
+    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon - Volcano-less (2)", 6),
+    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon - KFR", 7),
+    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon - Moon Rock", 8),
+    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon - Balloon World", 10),
+    new OdysseySceneDesc("LavaWorldHomeStage", "Luncheon - Bruncheon", 11),
     new OdysseySceneDesc("LavaWorldUpDownExStage", "Magma Swap Sublevel"),
     new OdysseySceneDesc("LavaWorldBubbleLaneExStage", "Magma Narrow Path Sublevel"),
     new OdysseySceneDesc("LavaWorldFenceLiftExStage", "Lava Islands Sublevel"),
@@ -495,12 +611,24 @@ const sceneDescs = [
     new OdysseySceneDesc("GabuzouClockExStage", "Rotating Gear Sublevel"),
     new OdysseySceneDesc("LavaWorldTreasureStage", "Treasure Room"),
     new OdysseySceneDesc("LavaWorldCostumeStage", "Simmering Room Costume Sublevel"),
+
     "Ruined Kingdom",
-    new OdysseySceneDesc("BossRaidWorldHomeStage", "Ruined Kingdom"),
+    new OdysseySceneDesc("BossRaidWorldHomeStage", "Ruined - First Visit", 1),
+    new OdysseySceneDesc("BossRaidWorldHomeStage", "Ruined - Peace", 2),
+    new OdysseySceneDesc("BossRaidWorldHomeStage", "Ruined - Post-game", 3),
+    new OdysseySceneDesc("BossRaidWorldHomeStage", "Ruined - Moon Rock", 4),
+    new OdysseySceneDesc("BossRaidWorldHomeStage", "Ruined - Balloon World", 5),
+    new OdysseySceneDesc("BossRaidWorldHomeStage", "Ruined - KFR", 6),
     new OdysseySceneDesc("BullRunExStage", "Chincho Army Sublevel"),
     new OdysseySceneDesc("DotTowerExStage", "Roulette Tower Sublevel"),
+
     "Bowser's Kingdom",
-    new OdysseySceneDesc("SkyWorldHomeStage", "Bowser's Kingdom"),
+    new OdysseySceneDesc("SkyWorldHomeStage", "Bowser’s - First Visit", 1),
+    new OdysseySceneDesc("SkyWorldHomeStage", "Bowser’s - Peace", 2),
+    new OdysseySceneDesc("SkyWorldHomeStage", "Bowser’s - Post-game", 3),
+    new OdysseySceneDesc("SkyWorldHomeStage", "Bowser’s - Moon Rock", 4),
+    new OdysseySceneDesc("SkyWorldHomeStage", "Bowser’s - Balloon World", 5),
+    new OdysseySceneDesc("SkyWorldHomeStage", "Bowser’s - KFR", 6),
     new OdysseySceneDesc("SkyWorldShopStage", "Crazy Cap"),
     new OdysseySceneDesc("SkyWorldCostumeStage", "Folding Screen Costume Sublevel"),
     new OdysseySceneDesc("TsukkunClimbExStage", "Wooden Tower Sublevel"),
@@ -509,8 +637,11 @@ const sceneDescs = [
     new OdysseySceneDesc("SkyWorldCloudBonusExStage", "Sky Slope Bonus Stage"),
     new OdysseySceneDesc("KaronWingTowerStage", "Hexagon Tower Sublevel"),
     new OdysseySceneDesc("SkyWorldTreasureStage", "Bowser's Castle Treasure Vault"),
+
     "Moon Kingdom",
-    new OdysseySceneDesc("MoonWorldHomeStage", "Moon Kingdom"),
+    new OdysseySceneDesc("MoonWorldHomeStage", "Moon - Peace/Post-game", 1),
+    new OdysseySceneDesc("MoonWorldHomeStage", "Moon - Moon Rock", 3),
+    new OdysseySceneDesc("MoonWorldHomeStage", "Moon - Balloon World", 4),
     new OdysseySceneDesc("MoonWorldWeddingRoomStage", "Wedding Hall"),
     new OdysseySceneDesc("MoonWorldShopRoom", "Crazy Cap"),
     new OdysseySceneDesc("MoonWorldSphinxRoom", "Sphinx's Hidden Vault"),
@@ -519,8 +650,13 @@ const sceneDescs = [
     new OdysseySceneDesc("Galaxy2DExStage", "2D Galaxy Sublevel"),
     new OdysseySceneDesc("MoonWorldBasementStage", "Crumbling Cavern Bowser Stage"),
     new OdysseySceneDesc("MoonWorldKoopa1Stage", "Captured Bowser Stage Background"),
+
     "Mushroom Kingdom",
-    new OdysseySceneDesc("PeachWorldHomeStage", "Mushroom Kingdom"),
+    new OdysseySceneDesc("PeachWorldHomeStage", "Mushroom - Mushroom", 1),
+    new OdysseySceneDesc("PeachWorldHomeStage", "Mushroom - Post-game", 2),
+    new OdysseySceneDesc("PeachWorldHomeStage", "Mushroom - World Peace?", 3),
+    new OdysseySceneDesc("PeachWorldHomeStage", "Mushroom - KFR", 4),
+    new OdysseySceneDesc("PeachWorldHomeStage", "Mushroom - Balloon World", 5),
     new OdysseySceneDesc("PeachWorldCastleStage", "Peach's Castle Interior"),
     new OdysseySceneDesc("PeachWorldShopStage", "Crazy Cap"),
     new OdysseySceneDesc("PeachWorldCostumeStage", "SM64 Castle Courtyard Sublevel"),
@@ -539,8 +675,10 @@ const sceneDescs = [
     new OdysseySceneDesc("RevengeForestBossStage", "Torkdrift's Rematch Sublevel"),
     new OdysseySceneDesc("RevengeBossKnuckleStage", "Knucklotec's Rematch Sublevel"),
     new OdysseySceneDesc("RevengeGiantWanderBossStage", "Mollusque-Lanceur's Rematch Sublevel"),
+
     "Dark Side",
-    new OdysseySceneDesc("Special1WorldHomeStage", "Dark Side"),
+    new OdysseySceneDesc("Special1WorldHomeStage", "Dark Side - First Visit", 1),
+    new OdysseySceneDesc("Special1WorldHomeStage", "Dark Side - Peace", 2),
     new OdysseySceneDesc("PackunPoisonNoCapExStage", "Invisible Road Sublevel"),
     new OdysseySceneDesc("KillerRoadNoCapExStage", "Breakdown Road Sublevel"),
     new OdysseySceneDesc("BikeSteelNoCapExStage", "Vanishing Road Sublevel"),
@@ -551,11 +689,14 @@ const sceneDescs = [
     new OdysseySceneDesc("Special1WorldTowerBombTailStage", "Hariet Rematch"),
     new OdysseySceneDesc("Special1WorldTowerFireBlowerStage", "Spewart Rematch"),
     new OdysseySceneDesc("Special1WorldTowerCapThrowerStage", "Rango Rematch"),
+
     "Darker Side",
-    new OdysseySceneDesc("Special2WorldHomeStage", "Darker Side"),
+    new OdysseySceneDesc("Special2WorldHomeStage", "Darker Side - First Visit", 1),
+    new OdysseySceneDesc("Special2WorldHomeStage", "Darker Side - Peace", 2),
     new OdysseySceneDesc("Special2WorldKoopaStage", "Darker Side Bowser Area"),
     new OdysseySceneDesc("Special2WorldLavaStage", "Darker Side Course Area"),
     new OdysseySceneDesc("Special2WorldCloudStage", "Darker Side Cloud Area"),
+
     "Duplicates",
     new OdysseySceneDesc("MoonWorldKoopa2Stage", "Captured Bowser Stage Background Duplicate"),
     new OdysseySceneDesc("MoonWorldWeddingRoom2Stage", "Wedding Hall Duplicate"),

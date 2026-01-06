@@ -208,9 +208,9 @@ export class OdysseyProgram extends DeviceProgram {
         else if  (mtx_select == 13) //tex coord 3
             return 'v_TexCoord3';
         else if  (mtx_select == 20) //indirect coord 0
-            return 'v_IrradianceVertex.xy'; // is this right?
+            return 'indirectCoords.xy';
         else if  (mtx_select == 21) //indirect coord 1
-            return 'v_IrradianceVertex.zw'; // same here
+            return 'indirectCoords.zw';
         else if  (mtx_select == 30) //sphere mapping
             return 'v_SphereCoords.xy';
         else //TODO 50 - 54 are proj texture types

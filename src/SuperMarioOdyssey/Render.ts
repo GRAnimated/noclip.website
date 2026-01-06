@@ -37,6 +37,8 @@ import { fillHdrComposeUniforms, HdrCompose } from './Shaders/HdrCompose.js';
 import { RenderCloudLayer } from './Shaders/RenderCloudLayer.js';
 
 export class BRTITextureHolder extends TextureHolder {
+    public cubeMapSuffixName: string = '';
+
     public addFRESTextures(device: GfxDevice, fres: FRES): void {
         const bntxFile = fres.externalFiles.find((f) => f.name === 'textures.bntx');
         if (bntxFile !== undefined)
@@ -47,7 +49,6 @@ export class BRTITextureHolder extends TextureHolder {
         const bntx = BNTX.parse(buffer);
         for (let i = 0; i < bntx.textures.length; i++) {
             const texName = bntx.textures[i].name;
-            // TODO: Load every cubemap
             if (texName.startsWith("Default_") || texName.startsWith("SkyOnly_")) {
                 this.addCubemapTexture(device, bntx.textures[i]);
             } else {
@@ -330,6 +331,7 @@ class MaterialParams {
     public displacement1_scale = 0.0;
     public stain_uv_scale = 0.0;
     public indirect_depth_scale = 0.0;
+    public indirect0_scale: vec2 = vec2.create();
     public indirect1_scale: vec2 = vec2.create();
     public proc_texture_3d_scale = vec3.fromValues(1, 1, 1);
     public translucence_sharpness = 0.0;
@@ -497,7 +499,7 @@ class FMATInstance {
             this.textureMapping[i].gfxSampler = gfxSampler;
         }
 
-        const cubemapTextureName = textureHolder.textureNames.find(name => name === 'Default_');
+        const cubemapTextureName = 'Default_' + textureHolder.cubeMapSuffixName;
         if (cubemapTextureName) {
             const gfxSampler = cache.createSampler({
                 minFilter: GfxTexFilterMode.Bilinear,
@@ -622,6 +624,7 @@ class FMATInstance {
                     materialParams[p.name] = parseFMAT_ShaderParam_Float(p);
                     break;
 
+                case 'indirect0_scale':
                 case 'indirect1_scale':
                     if (!materialParams[p.name]) materialParams[p.name] = vec2.create();
                     parseFMAT_ShaderParam_Float2(materialParams[p.name], p);
@@ -753,8 +756,8 @@ class FMATInstance {
         d[offs++] = materialParams.refract_thickness;
 
         // indirect0_scale
-        d[offs++] = 0.0;
-        d[offs++] = 0.0;
+        d[offs++] = materialParams.indirect0_scale[0];
+        d[offs++] = materialParams.indirect0_scale[1];
         
         // indirect1_scale (vec2)
         d[offs++] = materialParams.indirect1_scale[0];
@@ -1131,8 +1134,10 @@ class FSHPInstance {
         d[offs++] = 2.2;  // HDRTranslate_uDynamicRange
         offs += 2;          // padding
 
-        const dir = latLonToDirection(preset.DirectionalLight.DirectionParam.Y, preset.DirectionalLight.DirectionParam.X);
-        
+        let dir: { x: number; y: number; z: number } = {x: 0, y: 0, z: 0};
+        if (preset !== null)
+            dir = latLonToDirection(preset.DirectionalLight.DirectionParam.Y, preset.DirectionalLight.DirectionParam.X);
+
         // const lightDir = vec3.fromValues(0.3, 0.9, -0.2);
         const lightDir = vec3.fromValues(-dir.x, -dir.y, -dir.z);
         vec3.normalize(lightDir, lightDir);
@@ -1201,8 +1206,12 @@ class FSHPInstance {
         d[offs++] = viewerInput.camera.worldMatrix[14];
         offs += 1; // padding
 
-        const fog = preset.Fog;
-        const yFog = preset.YFog;
+        const fog = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1 };
+        const yFog = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1 };
+        if (preset !== null) {
+            const fog = preset.Fog;
+            const yFog = preset.YFog;
+        }
 
         // Fog parameters
         // cFogColor
@@ -1409,8 +1418,9 @@ export class BasicFRESRenderer {
 
     private exposureSlider: UI.Slider;
     private enableHDR: UI.Checkbox;
+    private useOriginalExposure: UI.Checkbox;
 
-    private exposure: number = 2.2;
+    private exposure: number = 0.05;
 
     private device: GfxDevice;
 
@@ -1453,7 +1463,12 @@ export class BasicFRESRenderer {
     private createExposureTexture(device: GfxDevice, textureHolder: BRTITextureHolder): void {
         // 1x1 texture
         this.exposureTexture = device.createTexture(makeTextureDescriptor2D(GfxFormat.F32_RGBA, 1, 1, 1));
-        const exposure = this.exposure;
+        let exposure = this.exposure;
+        if (this.useOriginalExposure !== undefined && this.useOriginalExposure.checked) {
+            const preset = OdysseyRenderer.graphicsPreset!;
+            exposure = preset.HdrCompose.Exposure;
+            console.log(exposure);
+        }
         const exposureData = new Float32Array([exposure, exposure, exposure, exposure]);
         device.uploadTextureData(this.exposureTexture, 0, [exposureData]);
         
@@ -1483,9 +1498,9 @@ export class BasicFRESRenderer {
         cameraPanel.setTitle(UI.RENDER_HACKS_ICON, 'Camera Debug');
 
         this.exposureSlider = new UI.Slider();
-        this.exposureSlider.setRange(0, 250, 0.01);
+        this.exposureSlider.setRange(0, 2, 0.001);
         this.exposureSlider.setLabel("Exposure: " + this.exposureSlider.getValue());
-        this.exposureSlider.setValue(2.2);
+        this.exposureSlider.setValue(0.05);
         this.exposureSlider.onvalue = () => {
             this.exposureSlider.setLabel("Exposure: " + this.exposureSlider.getValue());
             this.exposure = this.exposureSlider.getValue();
@@ -1496,6 +1511,13 @@ export class BasicFRESRenderer {
         this.enableHDR = new UI.Checkbox("Enable HDR");
         this.enableHDR.checked = false;
         cameraPanel.contents.appendChild(this.enableHDR.elem);
+
+        this.useOriginalExposure = new UI.Checkbox("Use Original Exposure");;
+        this.useOriginalExposure.checked = false;
+        cameraPanel.contents.appendChild(this.useOriginalExposure.elem);
+        this.useOriginalExposure.onchanged = () => {
+            this.createExposureTexture(this.device, this.textureHolder);
+        }
 
         return [cameraPanel, layersPanel];
     }

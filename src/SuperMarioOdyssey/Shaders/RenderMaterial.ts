@@ -89,8 +89,11 @@ in vec4 v_VtxColor;
 in vec4 v_IrradianceVertex;
 in vec2 v_SphereCoords;
 in vec4 v_PerspDiv;
+in vec4 v_IndirectCoords;
 
 ${ generateFogCode() }
+
+vec4 indirectCoords;
 
 vec2 SelectTexCoord(int mtx_select)
 {
@@ -103,9 +106,9 @@ vec2 SelectTexCoord(int mtx_select)
     else if  (mtx_select == 13) //tex coord 3
         return v_TexCoord3;
     else if  (mtx_select == 20) //indirect coord 0
-        return v_IrradianceVertex.xy; // is this right?
+        return indirectCoords.xy;
     else if  (mtx_select == 21) //indirect coord 1
-        return v_IrradianceVertex.zw; // same here
+        return indirectCoords.zw;
     else if  (mtx_select == 30) //sphere mapping
         return v_SphereCoords.xy;
     else //TODO 50 - 54 are proj texture types
@@ -486,7 +489,9 @@ void PrecomputeBlends() {
 vec3 CalculateEmissionScale(vec3 emission, int scale_type, vec4 irradiance)
 {
     //Emission scale
-    if      (scale_type == 1) // emission * irradiance, max by emission
+    if (scale_type == 0) // added, fixes moon kingdom background
+        return vec3(0.0);
+    else if (scale_type == 1) // emission * irradiance, max by emission
         emission = max(irradiance.rgb * emission.rgb, emission.rgb);
     else if (scale_type == 2) // emission * irradiance, max by 1.0
         emission = emission * max(irradiance.rgb, 1.0);
@@ -587,10 +592,11 @@ vec4 CalculateDiffuseIrradianceLight(Light light)
         }
         else //use material roughness cubemap
         {
-            // TODO: and TEMP: Roughness cubemap
-            vec4 irradiance_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, dir);
+            // TODO: and TEMP: Roughness cubemap, which should be LOD 5.0
+            vec4 irradiance_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, dir, 1.0);
             irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
         }
+        // TODO: use cTextureMaterialLightSphere
         if (${this.getShaderOptionBoolean('enable_material_sphere_light')} == true)
         {
 	        vec2 sphereCoords = light.N.xy * vec2(0.5) + vec2(0.5, 0.5);
@@ -611,6 +617,14 @@ vec4 CalculateDiffuseIrradianceLight(Light light)
     return irradiance;
 }
 
+float RoughnessRemap(float roughness) {
+    float gloss = 1.0 - roughness;
+    gloss *= gloss;
+    gloss *= gloss;
+    return gloss;
+}
+
+/*
 vec3 CalculateBrdf(vec3 view_normal, vec3 dir, float roughness, vec3 f0)
 {
     float r = (1.0 - roughness);
@@ -627,6 +641,37 @@ vec3 CalculateBrdf(vec3 view_normal, vec3 dir, float roughness, vec3 f0)
 
     return f0.rgb * b + s * saturate(f0.g * 50.0);
 }
+*/
+
+// Implementation based on calcEnvDFGPolynomial from alEnvBrdfUtil.glsl
+vec3 CalculateBrdf(vec3 view_normal, vec3 dir, float roughness, vec3 F0)
+{
+    float gloss = RoughnessRemap(roughness);
+    float x = gloss;
+    float y = dot(view_normal, -dir); // N_V;
+
+    float b1 = -0.1688;
+    float b2 =  1.895;
+    float b3 =  0.9903;
+    float b4 = -4.853;
+    float b5 =  8.404;
+    float b6 = -5.069;
+
+    float d0 = 0.6045;
+    float d1 = 1.699;
+    float d2 = -0.5228;
+    float d3 = -3.603;
+    float d4 = 1.404;
+    float d5 = 0.1939;
+    float d6 = 2.661;
+
+    float bias  = clamp(min( x*(b1 + b2*x), b3 + y*(b4 + y*(b5 + b6*y))), 0.0, 1.0);
+    float delta = clamp(d0 + y*(d2 + d5*y) + x*(d1 + x*(d3 + d6*x) + d4*y), 0.0, 1.0);
+
+    float scale = delta - bias;
+    bias *= clamp(50.0*F0.g, 0.0, 1.0);
+    return F0 * scale + bias;
+}
 
 vec2 GetScreenCoordinates()
 {
@@ -635,8 +680,28 @@ vec2 GetScreenCoordinates()
     return screenCoord;
 }
 
+void CalculateIndirectCoordinates()
+{
+    if (${this.getShaderOptionBoolean('enable_indirect0')} == true)
+    {
+        vec2 tex_coord_target = SelectTexCoord(${this.getShaderOptionNumber('indirect0_tgt_uv')});
+        vec2 ind_map = ${this.genOutput('indirect0_src_map')}.xy;
+        vec2 ind_offset = (ind_map - 0.5) * mat.indirect0_scale;
+        indirectCoords.xy = tex_coord_target + ind_offset;
+    }
+
+    if (${this.getShaderOptionBoolean('enable_indirect1')} == true)
+    {
+        vec2 tex_coord_target = SelectTexCoord(${this.getShaderOptionNumber('indirect1_tgt_uv')});
+        vec2 ind_map = ${this.genOutput('indirect1_src_map')}.xy;
+        vec2 ind_offset = (ind_map - 0.5) * mat.indirect1_scale;
+        indirectCoords.zw = tex_coord_target + ind_offset;
+    }
+}
+
 void main() {
     PrecomputeBlends();
+    CalculateIndirectCoordinates();
 
     vec4 base_color           = ${this.genOutput('o_base_color')};
     vec2 normal_map           = ${this.genOutput('o_normal')}.rg;
@@ -647,7 +712,7 @@ void main() {
     float alpha      = GetComp(${this.genOutput('o_alpha')}, ${this.getShaderOptionNumber('alpha_component')}).r;
     bool has_transparent_tex = ${this.getShaderOptionBoolean('enable_transparent')};
 
-    vec3 eye_to_pos = vec3(v_ViewPos.zw, v_LightColorVPosZ.w);
+    vec3 eye_to_pos = v_ViewPos.xyz;
     vec3 dir = normalize(eye_to_pos);
 
     vec3 specularTerm = vec3(0.0);
@@ -677,7 +742,7 @@ void main() {
     vec3 N = CalculateNormals(v_Normal, normal_map);
     N.x *= modelInfo.normal_axis_x_scale;
 
-    vec3 view_normal = normalize(multMtx34Vec3(mdlEnvView.cView, N).xyz);
+    vec3 view_normal = normalize(rotMtx34Vec3(mdlEnvView.cView, N));
 
     //Normal to eye
     float N_I = clamp(fma(view_normal.z, -dir.z,
@@ -773,7 +838,7 @@ void main() {
     else
     {
         // TODO: and TEMP: Roughness cubemap
-        vec4 spec_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, light.R);
+        vec4 spec_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, dir, roughness * 5.0);
         specularTerm.rgb += spec * (spec_cubemap.rgb * mdlEnvView.uIrradianceScale) * brdf;
     }
 
@@ -805,14 +870,12 @@ void main() {
         int transparent_tex_type = ${this.getShaderOptionNumber('transparent_tex_type')};
         
         // TRANS_TEX_TYPE_DIFFUSE || TRANS_TEX_TYPE_DIFFUSE_IRRADIANCE
-        if (has_transparent_tex && (transparent_tex_type == 15 || transparent_tex_type == 20))
-        {
-            // TODO: Need GetTransparentTexOutput function
-            // vec3 transparent_tex = GetTransparentTexOutput(${this.genOutput('o_transparent_tex')}, refract_bias_x, refract_bias_y).rgb;
-            // vec3 refract_value = transparent_tex * refract_color * refract_amount;
-            // if (transparent_tex_type == 20) // TRANS_TEX_TYPE_DIFFUSE_IRRADIANCE
-            //     refract_value *= irradiance.rgb;
-            // diffuseTerm.rgb += refract_value;
+        if (has_transparent_tex && (transparent_tex_type == 15 || transparent_tex_type == 20)) {
+            vec3 transparent_tex = GetTransparentTexOutput(${this.getShaderOptionNumber('o_transparent_tex')}, refract_bias_x, refract_bias_y).rgb;
+            vec3 refract_value = transparent_tex * refract_color * refract_amount;
+            if (transparent_tex_type == 20) // TRANS_TEX_TYPE_DIFFUSE_IRRADIANCE
+                refract_value *= irradiance.rgb;
+            diffuseTerm.rgb += refract_value;
         }
         
         int transparent_type = ${this.getShaderOptionNumber('transparent_type')};
@@ -887,7 +950,7 @@ void main() {
     // Emission
     if (${this.getShaderOptionBoolean('enable_emission')} == true)
         light_buf.rgb += CalculateEmission(irradiance).rgb;
-    
+
     // TODO: metal flake emission
 
     if (${this.getShaderOptionBoolean('enable_sss')} == true)
@@ -934,18 +997,20 @@ out vec4 v_VtxColor;
 out vec4 v_IrradianceVertex;
 out vec2 v_SphereCoords;
 out vec4 v_PerspDiv;
+out vec4 v_IndirectCoords;
 
 void main() {
     vec3 t_PositionView = UnpackMatrix(u_ModelView) * vec4(_p0, 1.0);
     gl_Position = UnpackMatrix(u_Projection) * vec4(t_PositionView, 1.0);
     
+    v_ViewPos = vec4(t_PositionView, 1.0);
+
     v_TexCoord0 = _u0;
     v_TexCoord1 = _u1;
     v_TexCoord2 = _u2;
     v_TexCoord3 = _u3;
     v_VtxColor = _c0;
 
-    v_ViewPos.zw = t_PositionView.xy;
     v_LightColorVPosZ.w = t_PositionView.z;
 
     vec3 light_color = textureLod(u_DirectionalLightLUT, vec2(mdlEnvView.cDirLightViewDirFetchPos.w, 0.5), 0.0).xyz;
@@ -964,8 +1029,8 @@ void main() {
         }
         else //use material roughness cubemap
         {
-            // TODO: and TEMP: Roughness cubemap
-            vec4 irradiance_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, v_Normal);
+            // TODO: and TEMP: Roughness cubemap, which should be LOD 5.0
+            vec4 irradiance_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, v_Normal, 5.0);
             v_IrradianceVertex.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
         }
     }

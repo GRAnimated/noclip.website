@@ -186,42 +186,80 @@ void main ( void )
 }
 `;
 }
+type SCurveCoeffs = {
+    toe: [number, number, number, number];
+    shoulder: [number, number, number, number];
+};
 
-function computeSCurveCoeffsFromPreset(hdr: GraphicsPreset['HdrCompose']):
-{ toe: [number, number, number, number], shoulder: [number, number, number, number] } {
-    const C = hdr.CrossOver;
-    const black = hdr.BlackPoint;
-    const white = hdr.WhitePoint;
+// Filmic Param from the shader
+function evalFilmicParam(x: number, S: number, Ls: number, La: number, T: number, Tn: number, Td: number): number {
+    const Nx = x * (S * x + La * Ls) + T * Tn;
+    const Dx = x * (S * x + Ls)     + T * Td;
+    if (Dx === 0.0) return 0.0;
+    return Nx / Dx - Tn / Td;
+}
 
-    // Map into [0,1] weights
-    const toeStrength = 1.0 / (1.0 + Math.exp(-hdr.Toe));
-    const shoulderStrength = 1.0 / (1.0 + Math.exp(-hdr.Sholuder));
+// Numeric derivative of Filmic Param at x
+function evalFilmicParamSlope(x: number, S: number, Ls: number, La: number, T: number, Tn: number, Td: number): number {
+    const h = Math.max(1e-3, x * 0.01);
+    const y1 = evalFilmicParam(x - h, S, Ls, La, T, Tn, Td);
+    const y2 = evalFilmicParam(x + h, S, Ls, La, T, Tn, Td);
+    return (y2 - y1) / (2 * h);
+}
 
-    const span = white - black;
-    const baseMid = (C - black) / span;
-    
-    const toeAmount = (toeStrength - 0.5) * 2.0;           // -1 to 1
-    const shoulderAmount = (shoulderStrength - 0.5) * 2.0; // -1 to 1
-    
-    const toeBias = -toeAmount * 0.0; // pull toward darks
-    const shoulderBias = shoulderAmount * 0.0; // pull toward brights
+// Matches Filmic at 0, C, and W and tries to keep Filmic's slope at C
+function computeSCurveCoeffsFromPreset(hdr: GraphicsPreset['HdrCompose']): SCurveCoeffs {
+    const C  = hdr.CrossOver;
+    const T  = hdr.ToeStrength;
+    const S  = hdr.ShoulderStrength;
+    const Ls = hdr.LinearStrength;
+    const La = hdr.LinearAngle;
+    const Tn = hdr.ToeNumerator;
+    const Td = hdr.ToeDenominator;
 
-    let mid = baseMid + shoulderBias - toeBias;
-    mid = Math.min(1.0, Math.max(0.0, mid));
+    const y0     = evalFilmicParam(0.0, S, Ls, La, T, Tn, Td);
+    const yC     = evalFilmicParam(C,   S, Ls, La, T, Tn, Td);
+    const slopeC = evalFilmicParamSlope(C, S, Ls, La, T, Tn, Td);
 
-    // how far above C to start compressing toward white, based on white point
-    let shoulderSoftness = (white - C) * 0.0;
+    // White point
+    const W = C + 6.0;
+    const yW = evalFilmicParam(W, S, Ls, La, T, Tn, Td);
 
-    let k = 1.0;
-    if (mid > 0.0 && mid < 1.0) {
-        k = mid / (C * (1.0 - mid));
+    // Toe
+    const dToe = 1.0;
+    const bToe = 0.01 + T * 0.05; // small curvature to keep close to Filmic
+    const cToe = y0 * dToe;
+    const aToe = (yC * (bToe * C + dToe) - cToe) / C;
+
+    const toe: [number, number, number, number] = [
+        aToe,
+        bToe,
+        cToe,
+        dToe,
+    ];
+
+    // Shoulder
+    const dShoulder = 1.0;
+    const bShoulder = 0.01 + S * 0.05; // small curvature to keep close to Filmic
+
+    const C1 = yC * (bShoulder * C + dShoulder);
+    const C2 = yW * (bShoulder * W + dShoulder);
+
+    const det = C - W;
+    let aShoulder: number;
+    let cShoulder: number;
+
+    if (Math.abs(det) > 0.0001) {
+        aShoulder = (C1 - C2) / det;
+        cShoulder = C1 - aShoulder * C;
+    } else {
+        // continue with Filmic's slope at C
+        const slope = slopeC;
+        aShoulder = slope * dShoulder;
+        cShoulder = yC * dShoulder - aShoulder * C;
     }
 
-    const t = C + shoulderSoftness;
-    const s = mid * (C + t) - C;
-    
-    const toe: [number, number, number, number] = [k, k, 0.0, 1.0];
-    const shoulder: [number, number, number, number] = [1.0, 1.0, s, t];
+    const shoulder: [number, number, number, number] = [aShoulder, bShoulder, cShoulder, dShoulder];
 
     return { toe, shoulder };
 }
@@ -235,8 +273,10 @@ export function fillHdrComposeUniforms(d: Float32Array, offs: number, preset: Gr
     d[offs++] = 0.0;
     d[offs++] = 0.0;
     
+    const EXPOSURE_SCALE = 4000.0;
+
     // uExposure
-    d[offs++] = hdr.Exposure;
+    d[offs++] = hdr.Exposure * EXPOSURE_SCALE;
     
     // uCameraMaskBase
     d[offs++] = 0.0;
