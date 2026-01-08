@@ -793,8 +793,6 @@ void main() {
     roughness *= mat.force_roughness;
     roughness = saturate(roughness);
 
-    vec3 vertex_normal = v_Normal;
-
     vec3 N = CalculateNormals(v_Normal, normal_map);
     N.x *= modelInfo.normal_axis_x_scale;
 
@@ -898,7 +896,7 @@ void main() {
     else
     {
         // TODO: and TEMP: Roughness cubemap
-        vec4 spec_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, dir, roughness * 5.0);
+        vec4 spec_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, light.R, roughness * 5.0);
         specularTerm.rgb += spec * (spec_cubemap.rgb * mdlEnvView.uIrradianceScale) * brdf;
     }
 
@@ -923,13 +921,15 @@ void main() {
     diffuseTerm += base_color.rgb * saturate(1.0 - metalness) * directionalLight * light_color;
 
     // Base color refract type
-    if (${this.getShaderOptionBoolean('enable_transparent')} == true){
+    if (${this.getShaderOptionBoolean('enable_transparent')} == true) {
         vec3 refract_amount = refract_rate * (vec3(1) - brdf);
         vec3 refract_color = ${this.genOutput('o_refract_color')}.rgb;
 
         int transparent_tex_type = ${this.getShaderOptionNumber('transparent_tex_type')};
         
+        // TODO: This is broken!
         // TRANS_TEX_TYPE_DIFFUSE || TRANS_TEX_TYPE_DIFFUSE_IRRADIANCE
+        /*
         if (has_transparent_tex && (transparent_tex_type == 15 || transparent_tex_type == 20)) {
             vec3 transparent_tex = GetTransparentTexOutput(${this.getShaderOptionNumber('o_transparent_tex')}, refract_bias_x, refract_bias_y).rgb;
             vec3 refract_value = transparent_tex * refract_color * refract_amount;
@@ -937,6 +937,7 @@ void main() {
                 refract_value *= irradiance.rgb;
             diffuseTerm.rgb += refract_value;
         }
+        */
         
         int transparent_type = ${this.getShaderOptionNumber('transparent_type')};
         

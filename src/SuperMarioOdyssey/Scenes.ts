@@ -6,7 +6,7 @@ import { DataFetcher } from '../DataFetcher.js';
 import * as SARC from '../fres_nx/sarc.js';
 import * as BFRES from '../fres_nx/bfres.js';
 import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
-import { BRTITextureHolder, BasicFRESRenderer, FMDLRenderer, FMDLData, SkyRenderer, latLonToDirection } from './Render.js';
+import { BRTITextureHolder, BasicFRESRenderer, FMDLRenderer, FMDLData, SkyRenderer, latLonToDirection, TextureScopeKey } from './Render.js';
 import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { assert, assertExists } from '../util.js';
 import { mat4 } from 'gl-matrix';
@@ -45,7 +45,8 @@ class ResourceSystem {
             const fres = BFRES.parse(sarc.files[i].buffer);
             this.bfresCache.set(mountName, fres);
 
-            this.textureHolder.addFRESTextures(device, fres);
+            const fileName = mountName.substring(mountName.lastIndexOf('/') + 1);
+            this.textureHolder.addFRESTextures(device, fres, fileName);
         }
     }
 
@@ -314,14 +315,15 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                 console.log(graphicsPreset);
 
                 if (graphicsPreset) {
+                    const skyLocation = `ObjectData/${graphicsPreset.Sky.Name}`;
                     sceneRenderer.setGraphicsPreset(graphicsPreset);
-                    resourceSystem.fetchData(device, dataFetcher, `ObjectData/${graphicsPreset.Sky.Name}`);
+                    resourceSystem.fetchData(device, dataFetcher, skyLocation);
 
                     await resourceSystem.waitForLoad();
 
-                    const skyFmdlData = resourceSystem.getFMDLData(device, `ObjectData/${graphicsPreset.Sky.Name}`);
+                    const skyFmdlData = resourceSystem.getFMDLData(device, skyLocation);
                     if (skyFmdlData !== null) {
-                        const skyRenderer = new SkyRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData);
+                        const skyRenderer = new SkyRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData, graphicsPreset.Sky.Name);
                         mat4.copy(skyRenderer.modelMatrix, placement);
                         
                         const preset = OdysseyRenderer.graphicsPreset!;
@@ -355,7 +357,7 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                         if (fmdlData === null)
                             continue;
 
-                        const fmdlRenderer = new FMDLRenderer(device, cache, resourceSystem.textureHolder, fmdlData);
+                        const fmdlRenderer = new FMDLRenderer(device, cache, resourceSystem.textureHolder, fmdlData, `${skyEntry.UnitConfigName}`);
                         calcModelMtxFromTRSVectors(fmdlRenderer.modelMatrix, skyEntry.Translate, skyEntry.Rotate, skyEntry.Scale);
                         mat4.mul(fmdlRenderer.modelMatrix, placement, fmdlRenderer.modelMatrix);
                         sceneRenderer.fmdlRenderers.push(fmdlRenderer);
@@ -385,7 +387,7 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                     if (fmdlData === null)
                         continue;
 
-                    const fmdlRenderer = new FMDLRenderer(device, cache, resourceSystem.textureHolder, fmdlData);
+                    const fmdlRenderer = new FMDLRenderer(device, cache, resourceSystem.textureHolder, fmdlData, `${objectName}`);
                     calcModelMtxFromTRSVectors(fmdlRenderer.modelMatrix, stageObject.Translate, stageObject.Rotate, stageObject.Scale);
                     mat4.mul(fmdlRenderer.modelMatrix, placement, fmdlRenderer.modelMatrix);
                     sceneRenderer.fmdlRenderers.push(fmdlRenderer);

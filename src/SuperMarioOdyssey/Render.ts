@@ -37,7 +37,133 @@ import { fillHdrComposeUniforms, HdrCompose } from './Shaders/HdrCompose.js';
 import { RenderCloudLayer } from './Shaders/RenderCloudLayer.js';
 import { LinearDepth } from './Shaders/LinearDepth.js';
 
-export class BRTITextureHolder extends TextureHolder {
+export interface TextureScopeKey {
+    archiveName?: string;
+}
+
+function makeScopeId(scope: TextureScopeKey): string {
+    return scope.archiveName ?? '';
+}
+
+function makeDefaultGroupLabel(scope: TextureScopeKey): string {
+    return scope.archiveName ?? 'Global';
+}
+
+interface TextureEntry {
+    gfxTexture: GfxTexture;
+    viewerTexture: Viewer.Texture;
+    name: string;
+    scopeId: string;
+}
+
+class GroupedTextureHolder implements UI.TextureListHolder {
+    public gfxTextures: GfxTexture[] = [];
+    public viewerTextures: Viewer.Texture[] = [];
+    public _textureNames: string[] = [];
+    public onnewtextures: (() => void) | null = null;
+    private entries: TextureEntry[] = [];
+
+    // scopeId to flat index
+    private scopeIdToIndices = new Map<string, number[]>();
+
+    // scopeId to label
+    private scopeIdToLabel = new Map<string, string>();
+
+    private scopeIds: string[] = [];
+
+    public get textureNames(): string[] {
+        return this._textureNames;
+    }
+
+    public async getViewerTexture(i: number) {
+        return this.viewerTextures[i];
+    }
+
+    public fillTextureMapping(dst: TextureMapping, name: string): boolean {
+        const textureEntryIndex = this.textureNames.indexOf(name);
+        if (textureEntryIndex >= 0) {
+            dst.gfxTexture = this.gfxTextures[textureEntryIndex];
+            return true;
+        }
+        return false;
+    }
+
+    public fillScopedTextureMapping(dst: TextureMapping, name: string, scope: TextureScopeKey): boolean {
+        const scopeId = this.ensureGroup(scope);
+        const list = this.scopeIdToIndices.get(scopeId);
+        if (!list)
+            return false;
+
+        for (const idx of list) {
+            if (this.entries[idx].name === name) {
+                dst.gfxTexture = this.entries[idx].gfxTexture;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private ensureGroup(scope: TextureScopeKey, customLabel?: string): string {
+        const scopeId = makeScopeId(scope);
+        if (!this.scopeIdToIndices.has(scopeId)) {
+            this.scopeIdToIndices.set(scopeId, []);
+            this.scopeIds.push(scopeId);
+            const label = customLabel ?? makeDefaultGroupLabel(scope);
+            this.scopeIdToLabel.set(scopeId, label);
+        }
+        return scopeId;
+    }
+
+    public addTexture(gfxTexture: GfxTexture, viewerTexture: Viewer.Texture, scope: TextureScopeKey, groupLabel?: string): void {
+        const scopeId = this.ensureGroup(scope, groupLabel);
+
+        const index = this.entries.length;
+        const entry: TextureEntry = {
+            gfxTexture,
+            viewerTexture,
+            name: viewerTexture.name,
+            scopeId,
+        };
+        this.entries.push(entry);
+        this.gfxTextures.push(gfxTexture);
+        this.viewerTextures.push(viewerTexture);
+        this._textureNames.push(viewerTexture.name);
+
+        this.scopeIdToIndices.get(scopeId)!.push(index);
+
+        if (this.onnewtextures)
+            this.onnewtextures();
+    }
+
+    public getGroupCount(): number {
+        return this.scopeIds.length;
+    }
+
+    public getGroupName(i: number): string {
+        const scopeId = this.scopeIds[i];
+        return this.scopeIdToLabel.get(scopeId) ?? scopeId;
+    }
+
+    public getTextureIndicesForGroup(i: number): number[] {
+        const scopeId = this.scopeIds[i];
+        const indices = this.scopeIdToIndices.get(scopeId);
+        return indices ? indices.slice() : [];
+    }
+
+    public destroy(device: GfxDevice): void {
+        this.gfxTextures.forEach((texture) => device.destroyTexture(texture));
+        this.gfxTextures = [];
+        this.viewerTextures = [];
+        this._textureNames = [];
+        this.entries = [];
+        this.scopeIdToIndices.clear();
+        this.scopeIdToLabel.clear();
+        this.scopeIds = [];
+    }
+}
+
+
+export class BRTITextureHolder extends GroupedTextureHolder {
     public cubeMapSuffixName: string = '';
 
     public linearDepthTexture: GfxTexture;
@@ -59,45 +185,28 @@ export class BRTITextureHolder extends TextureHolder {
         });
     }
 
-    public addFRESTextures(device: GfxDevice, fres: FRES): void {
+    public addFRESTextures(device: GfxDevice, fres: FRES, archiveName: string): void {
         const bntxFile = fres.externalFiles.find((f) => f.name === 'textures.bntx');
-        if (bntxFile !== undefined)
-            this.addBNTXFile(device, bntxFile.buffer);
+        if (bntxFile !== undefined) {
+            const scope: TextureScopeKey = { archiveName: archiveName };
+            // console.log(`Adding FRES textures for archive: ${archiveName} with scope ${JSON.stringify(scope)}`);
+            this.addBNTXFile(device, bntxFile.buffer, scope);
+        }
     }
 
-    public addBNTXFile(device: GfxDevice, buffer: ArrayBufferSlice): void {
+    public addBNTXFile(device: GfxDevice, buffer: ArrayBufferSlice, scope: TextureScopeKey): void {
         const bntx = BNTX.parse(buffer);
         for (let i = 0; i < bntx.textures.length; i++) {
             const texName = bntx.textures[i].name;
             if (texName.startsWith("Default_") || texName.startsWith("SkyOnly_")) {
-                this.addCubemapTexture(device, bntx.textures[i]);
+                this.addCubemapTexture(device, bntx.textures[i], scope);
             } else {
-                this.addTexture(device, bntx.textures[i]);
+                this.addScopedTexture(device, bntx.textures[i], scope);
             }
         }
     }
 
-    private cropRGBA(src: Uint8Array, srcWidth: number, srcHeight: number, dstWidth: number, dstHeight: number): Uint8Array {
-        const dst = new Uint8Array(dstWidth * dstHeight * 4);
-
-        for (let y = 0; y < dstHeight; y++) {
-            const srcRow = y * srcWidth * 4;
-            const dstRow = y * dstWidth * 4;
-            dst.set(
-                src.subarray(srcRow, srcRow + dstWidth * 4),
-                dstRow
-            );
-        }
-
-        return dst;
-    }
-
-
-    public addTexture(device: GfxDevice, textureEntry: BNTX.BRTI): void {
-        // Don't add duplicates.
-        if (this.textureNames.includes(textureEntry.name))
-            return;
-
+    public addScopedTexture(device: GfxDevice, textureEntry: BNTX.BRTI, scope: TextureScopeKey): void {
         const gfxTexture = device.createTexture(makeTextureDescriptor2D(translateImageFormat(textureEntry.imageFormat), textureEntry.width, textureEntry.height, textureEntry.mipBuffers.length));
         const canvases: HTMLCanvasElement[] = [];
 
@@ -130,16 +239,11 @@ export class BRTITextureHolder extends TextureHolder {
         extraInfo.set('Format', getImageFormatString(textureEntry.imageFormat));
 
         const viewerTexture: Viewer.Texture = { name: textureEntry.name, surfaces: canvases, extraInfo };
-        this.gfxTextures.push(gfxTexture);
-        this.viewerTextures.push(viewerTexture);
-        this.textureNames.push(textureEntry.name);
+        
+        super.addTexture(gfxTexture, viewerTexture, scope);
     }
 
-    public addCubemapTexture(device: GfxDevice, textureEntry: BNTX.BRTI): void {
-        // Don't add duplicates.
-        if (this.textureNames.includes(textureEntry.name))
-            return;
-
+    public addCubemapTexture(device: GfxDevice, textureEntry: BNTX.BRTI, scope: TextureScopeKey): void {
         const numFaces = 6;
         const numMips = textureEntry.mipBuffers.length;
         const gfxTexture = device.createTexture({
@@ -204,9 +308,7 @@ export class BRTITextureHolder extends TextureHolder {
         extraInfo.set('Format', getImageFormatString(textureEntry.imageFormat));
 
         const viewerTexture: Viewer.Texture = { name: textureEntry.name, surfaces: canvases, extraInfo };
-        this.gfxTextures.push(gfxTexture);
-        this.viewerTextures.push(viewerTexture);
-        this.textureNames.push(textureEntry.name);
+        super.addTexture(gfxTexture, viewerTexture, scope);
     }
 
     public addLUTTexture(device: GfxDevice, width: number, color: { r: number; g: number; b: number; a: number }): void {
@@ -493,7 +595,7 @@ class FMATInstance {
     private megaStateFlags: Partial<GfxMegaStateDescriptor>;
     private materialParams: MaterialParams | CloudMaterialParams = new MaterialParams();
 
-    constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, public fmat: FMAT) {
+    constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, public fmat: FMAT, private archiveName: string) {
         this.program = createProgramForMaterial(fmat);
 
         // Fill in our texture mappings.
@@ -514,8 +616,14 @@ class FMATInstance {
             this.gfxSamplers.push(gfxSampler);
 
             const textureName = fmat.textureName[i];
-            textureHolder.fillTextureMapping(this.textureMapping[i], textureName);
-            (this.textureMapping[i] as any).name = textureName;
+            const scope: TextureScopeKey = {archiveName: this.archiveName};
+
+            // console.log(`Filling: ${this.archiveName} with scope ${JSON.stringify(scope)}`);
+            
+            if (!textureHolder.fillScopedTextureMapping(this.textureMapping[i], textureName, scope)) {
+                textureHolder.fillTextureMapping(this.textureMapping[i], textureName);
+            }
+
             this.textureMapping[i].gfxSampler = gfxSampler;
         }
 
@@ -1340,12 +1448,12 @@ export class FMDLRenderer {
     public visible = true;
     public name: string;
 
-    constructor(device: GfxDevice, cache: GfxRenderCache, public textureHolder: BRTITextureHolder, public fmdlData: FMDLData) {
+    constructor(device: GfxDevice, cache: GfxRenderCache, public textureHolder: BRTITextureHolder, public fmdlData: FMDLData, archiveName: string) {
         const fmdl = this.fmdlData.fmdl;
         this.name = fmdl.name;
 
         for (let i = 0; i < fmdl.fmat.length; i++)
-            this.fmatInst.push(new FMATInstance(device, cache, this.textureHolder, fmdl.fmat[i]));
+            this.fmatInst.push(new FMATInstance(device, cache, this.textureHolder, fmdl.fmat[i], archiveName));
 
         for (let i = 0; i < this.fmdlData.fshpData.length; i++) {
             const fshpData = this.fmdlData.fshpData[i];
@@ -1378,8 +1486,8 @@ export class FMDLRenderer {
 }
 
 export class SkyRenderer extends FMDLRenderer {
-    constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, fmdlData: FMDLData) {
-        super(device, cache, textureHolder, fmdlData);
+    constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, fmdlData: FMDLData, archiveName: string) {
+        super(device, cache, textureHolder, fmdlData, archiveName);
 
         for (let i = 0; i < this.fshpInst.length; i++) {
             this.fshpInst[i].enableCulling = false;
