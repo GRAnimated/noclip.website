@@ -1,5 +1,6 @@
 import { FMAT } from "../fres_nx/bfres";
 import { GfxShaderLibrary } from "../gfx/helpers/GfxShaderLibrary";
+import { GfxBindingLayoutDescriptor, GfxSamplerFormatKind, GfxTextureDimension } from "../gfx/platform/GfxPlatform";
 import { DeviceProgram } from "../Program";
 import { assert, assertExists } from "../util";
 import { generateShaderUtil } from "./Shaders/ShaderUtil";
@@ -7,7 +8,8 @@ import { generateShaderUtil } from "./Shaders/ShaderUtil";
 export const ubShapeParams = `
 layout(std140) uniform ub_ShapeParams {
     Mat4x4 u_Projection;
-    Mat3x4 u_ModelView;
+    Mat3x4 u_View; // was u_ModelView
+    Mat3x4 u_Model;
 };
 `;
 
@@ -145,7 +147,27 @@ uniform sampler2D u_Texture7;
 uniform samplerCube u_CubemapTexture0;
 uniform sampler2D u_DirectionalLightLUT;
 uniform sampler2D u_ExposureTexture;
+uniform sampler2D u_TextureLinearDepth;
+uniform sampler2D u_FrameBufferTexture;
 `;
+
+export const bindingLayouts: GfxBindingLayoutDescriptor[] = [
+    { numUniformBuffers: 4, numSamplers: 13, samplerEntries: [
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.Cube, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.UnfilterableFloat, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.UnfilterableFloat, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.UnfilterableFloat, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+    ] }
+];
 
 export class OdysseyProgram extends DeviceProgram {
     public static _p0: number = 0;
@@ -159,7 +181,9 @@ export class OdysseyProgram extends DeviceProgram {
     public static _m0: number = 8; // cubemap
     public static _lut0: number = 9; // cDirectionalLightColor
     public static _e0: number = 10; // exposure
-    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3', '_m0', '_lut0', '_e0' ];
+    public static _ld0: number = 11; // linear depth
+    public static _fb0: number = 12; // framebuffer texture
+    public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3', '_m0', '_lut0', '_e0', '_ld0', '_fb0' ];
 
     public static ub_ShapeParams = 0;
     public static ub_MdlEnvView = 1; // and ub_HDRTranslate

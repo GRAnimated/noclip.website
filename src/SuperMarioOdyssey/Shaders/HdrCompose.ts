@@ -152,7 +152,7 @@ void main ( void )
 
 	// Color Correction
 
-	int COLOR_CORRECTION_TYPE = 0; // TODO: pass in as uniform
+	int COLOR_CORRECTION_TYPE = 1; // TODO: pass in as uniform
 	if (COLOR_CORRECTION_TYPE == 1)
 	{
 		vec3 xyz = tone_map_color * uColorCorrectionCoeff.x + uColorCorrectionCoeff.y;
@@ -227,7 +227,7 @@ function computeSCurveCoeffsFromPreset(hdr: GraphicsPreset['HdrCompose']): SCurv
 
     // Toe
     const dToe = 1.0;
-    const bToe = 0.01 + T * 0.05; // small curvature to keep close to Filmic
+    const bToe = 0.005 + T * 0.02; // small curvature to keep close to Filmic
     const cToe = y0 * dToe;
     const aToe = (yC * (bToe * C + dToe) - cToe) / C;
 
@@ -240,7 +240,7 @@ function computeSCurveCoeffsFromPreset(hdr: GraphicsPreset['HdrCompose']): SCurv
 
     // Shoulder
     const dShoulder = 1.0;
-    const bShoulder = 0.01 + S * 0.05; // small curvature to keep close to Filmic
+    const bShoulder = 0.005 + S * 0.005; // small curvature to keep close to Filmic
 
     const C1 = yC * (bShoulder * C + dShoulder);
     const C2 = yW * (bShoulder * W + dShoulder);

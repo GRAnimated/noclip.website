@@ -76,6 +76,7 @@ vec4 fetchCubeMapIrradianceConvertHdr(samplerCube cube, vec3 dir) {
 
 this.frag = `
 in vec3 v_Normal;
+in vec3 v_WorldPos;
 in float v_Depth;
 in vec4 v_Tangents;
 in vec4 v_Bitangents;
@@ -210,13 +211,32 @@ vec3 CalculateNormals(vec3 normals, vec2 normal_map)
     return world_normal;
 }
 
+/*
 float CalculateSphereLight() {
     vec3 vertex_normal = normalize(v_Normal);
     if (${this.getShaderOptionBoolean('is_use_back_face_lighting')} == true)
         vertex_normal = 1.0 - vertex_normal;
 
-    vec3 view_normal = normalize(multMtx34Vec3(mdlEnvView.cView, vertex_normal.xyz));
-    vec3 view_pos = vec3(v_ViewPos.zw, v_LightColorVPosZ.w);
+    vec3 view_normal = normalize(rotMtx34Vec3(mdlEnvView.cView, vertex_normal));
+    // vec3 view_pos = vec3(v_ViewPos.zw, v_LightColorVPosZ.w);
+    vec3 view_pos = v_ViewPos.xyz;
+
+    vec3 dir = normalize(view_pos);
+
+    return clamp(fma(dir.z, -view_normal.z,
+                    fma(dir.x, -view_normal.x, 
+                    dir.y * -view_normal.y)), 0.0, 1.0);
+}
+*/
+
+float CalculateSphereLight() {
+    vec3 vertex_normal = normalize(v_Normal);
+    if (${this.getShaderOptionBoolean('is_use_back_face_lighting')} == true)
+        vertex_normal = 1.0 - vertex_normal;
+
+    vec3 view_normal = normalize(rotMtx34Vec3(mdlEnvView.cView, vertex_normal));
+    // vec3 view_pos = vec3(v_ViewPos.zw, v_LightColorVPosZ.w);
+    vec3 view_pos = v_ViewPos.xyz;
 
     vec3 dir = normalize(view_pos);
 
@@ -225,17 +245,47 @@ float CalculateSphereLight() {
                     dir.y * -view_normal.y)), 0.0, 1.0);
 }
 
+float calcFresnel(float hFresnelN, float V_H)
+{
+#if 1
+	// Spherical Gaussian approximation Fresnel
+	const float a1 = -5.55473;
+	const float a2 = -6.98316;
+	return hFresnelN + (1.0 - hFresnelN) * exp2((a1 * V_H + a2) * V_H);
+#else
+	// Disney's Fresnel
+	float V_H2 = V_H*V_H;
+	float V_H5 = V_H2*V_H2*V_H;
+	return mix(hFresnelN, 1.0, V_H5);
+#endif
+}
+
 vec4 CalculateSphereConstColor(int sphere_color_type, vec4 const_color, float sphere_rate_color) {
-    float cosTheta  = CalculateSphereLight();
+    float cosTheta = clamp(CalculateSphereLight(), 0.0, 1.0);
+    float bias = 0.05;
+    float NV = clamp(cosTheta + bias, 0.0, 1.0);
+
+    float hFresnelN = 0.05;
+
+    float F = calcFresnel(hFresnelN, NV);
+
+    float Fmin = hFresnelN;
+    float Fmax = 1.0;
+    float fresnelMask = clamp((F - Fmin) / (Fmax - Fmin), 0.0, 1.0);
+
+    float k = max(sphere_rate_color, 0.0001);
 
     if (sphere_color_type == 1) // inverted fresnel effect
     {
-        float amount = clamp(exp2(log2(cosTheta) * sphere_rate_color), 0.0, 1.0);
+        // float amount = clamp(exp2(log2(cosTheta) * sphere_rate_color), 0.0, 1.0);
+        float invMask = 1.0 - fresnelMask;
+        float amount = pow(invMask, k);
         return const_color * amount;
     }
     else if (sphere_color_type == 2) // fresnel effect
     {
-        float amount = clamp(exp2(log2(1.0 - cosTheta) * sphere_rate_color), 0.0, 1.0);
+        //float amount = clamp(exp2(log2(1.0 - cosTheta) * sphere_rate_color), 0.0, 1.0);
+        float amount = pow(fresnelMask, k);
         return const_color * amount;
     }
     else
@@ -700,6 +750,12 @@ void CalculateIndirectCoordinates()
 }
 
 void main() {
+    vec4 debug_fbo = texture(u_TextureLinearDepth, GetScreenCoordinates());
+    if (any(greaterThan(debug_fbo.rgb, vec3(0.0)))) {
+        gl_FragColor = debug_fbo;
+        return;
+    }
+
     PrecomputeBlends();
     CalculateIndirectCoordinates();
 
@@ -743,6 +799,10 @@ void main() {
     N.x *= modelInfo.normal_axis_x_scale;
 
     vec3 view_normal = normalize(rotMtx34Vec3(mdlEnvView.cView, N));
+
+    // float t1 = CalculateSphereLight();
+    // gl_FragColor = vec4(t1, t1, t1, 1.0);
+    // return;
 
     //Normal to eye
     float N_I = clamp(fma(view_normal.z, -dir.z,
@@ -881,30 +941,26 @@ void main() {
         int transparent_type = ${this.getShaderOptionNumber('transparent_type')};
         
         // TRANS_TYPE_IND_FBO || TRANS_TYPE_IND_FBO_DEPTH
-        if (transparent_type == 20 || transparent_type == 25)
-        {
+        if (transparent_type == 20 || transparent_type == 25) {
             vec2 ind_coords = refract_eta * -N_I * view_normal.xy;
             
-            vec2 coords = GetScreenCoordinates() + ind_coords;
+            vec2 view_diff = GetScreenCoordinates() + ind_coords;
             
-            // if (${this.getShaderOptionBoolean('enable_indirect_dist_correct')} == true)
-            // {
-            //     // TODO: Need cTextureLinearDepth
-            //     // float d = -abs(v_Normal.w - texture(cTextureLinearDepth, coords).x) * mat.indirect_depth_scale;
-            //     // d = saturate(1.0 - exp2(d));
-            //     // coords = GetScreenCoordinates() + ind_coords * d;
-            // }
-            
-            // if (transparent_type == 25) // TRANS_TYPE_IND_FBO_DEPTH
-            // {
-            //     // TODO: Need cTextureLinearDepth
-            //     // if (texture(cTextureLinearDepth, coords).x < v_Normal.w) 
-            //     //     coords = GetScreenCoordinates();
-            // }
-            
-            // TODO: Need cFrameBufferTex
-            // vec4 fbo = texture(cFrameBufferTex, coords);
-            // diffuseTerm.rgb += refract_amount * fbo.rgb * refract_color.rgb;
+            if (${this.getShaderOptionBoolean('enable_indirect_dist_correct')} == true) {
+                // calcIndirectDistCorrect
+                float diff_depth = -abs(v_Depth - texture(u_TextureLinearDepth, view_diff).x);
+                diff_depth = clamp01(1.0 - exp2(diff_depth * mat.indirect_depth_scale));
+                view_diff *= diff_depth;
+                view_diff = GetScreenCoordinates() + ind_coords * diff_depth;
+            }
+        
+            if (transparent_type == 25) { // TRANS_TYPE_IND_FBO_DEPTH
+                if (texture(u_TextureLinearDepth, view_diff).x < v_Depth) 
+                    view_diff = GetScreenCoordinates();
+            }
+        
+            vec4 fbo = texture(u_FrameBufferTexture, view_diff);
+            diffuseTerm.rgb += refract_amount * fbo.rgb * refract_color.rgb;
         }
     }
 
@@ -965,7 +1021,7 @@ void main() {
     light_buf.rgb = max(light_buf.rgb, 0.0);
     light_buf.rgb = min(light_buf.rgb, 2048.0);
 
-    light_buf.rgb = CalculateFog(light_buf.rgb, eye_to_pos);
+    light_buf.rgb = CalculateFog(light_buf.rgb, eye_to_pos, v_WorldPos);
 
     gl_FragColor = vec4(light_buf.rgb, light_buf.a);
 
@@ -984,6 +1040,7 @@ layout(location = 6) in vec2 _u2;
 layout(location = 7) in vec2 _u3;
 
 out vec3 v_Normal;
+out vec3 v_WorldPos;
 out float v_Depth;
 out vec4 v_Tangents;
 out vec4 v_Bitangents;
@@ -1000,10 +1057,18 @@ out vec4 v_PerspDiv;
 out vec4 v_IndirectCoords;
 
 void main() {
-    vec3 t_PositionView = UnpackMatrix(u_ModelView) * vec4(_p0, 1.0);
-    gl_Position = UnpackMatrix(u_Projection) * vec4(t_PositionView, 1.0);
-    
-    v_ViewPos = vec4(t_PositionView, 1.0);
+    // World space position
+    vec3 worldPos = UnpackMatrix(u_Model) * vec4(_p0, 1.0);
+
+    // View space position
+    vec3 viewPos = UnpackMatrix(u_View) * vec4(worldPos, 1.0);
+    gl_Position = UnpackMatrix(u_Projection) * vec4(viewPos, 1.0);
+
+    v_ViewPos = vec4(viewPos, 1.0);
+    v_WorldPos = worldPos;
+
+    // World space normal
+    v_Normal = normalize((UnpackMatrix(u_Model) * vec4(_n0.xyz, 0.0)).xyz);
 
     v_TexCoord0 = _u0;
     v_TexCoord1 = _u1;
@@ -1011,7 +1076,7 @@ void main() {
     v_TexCoord3 = _u3;
     v_VtxColor = _c0;
 
-    v_LightColorVPosZ.w = t_PositionView.z;
+    v_LightColorVPosZ.w = viewPos.z;
 
     vec3 light_color = textureLod(u_DirectionalLightLUT, vec2(mdlEnvView.cDirLightViewDirFetchPos.w, 0.5), 0.0).xyz;
     
@@ -1045,7 +1110,6 @@ void main() {
 
     v_PerspDiv.xy = gl_Position.xy / gl_Position.w;
 
-    v_Normal = _n0.xyz;
     v_Tangents = _t0;
     
     // bitangent

@@ -13,6 +13,7 @@ import { mat4 } from 'gl-matrix';
 import { SceneContext } from '../SceneBase.js';
 import { computeModelMatrixSRT, MathConstants } from '../MathHelpers.js';
 import { GfxRenderCache } from '../gfx/render/GfxRenderCache.js';
+import { CameraController } from '../Camera.js';
 
 const pathBase = `SuperMarioOdyssey`;
 const addon = `SuperMarioOdysseyMod`;
@@ -225,6 +226,10 @@ export class OdysseyRenderer extends BasicFRESRenderer {
     public setGraphicsPreset(preset: GraphicsPreset): void {
         OdysseyRenderer.graphicsPreset = preset;
     }
+
+    public adjustCameraController(c: CameraController) {
+        c.setSceneMoveSpeedMult(1.5);
+    }
 }
 
 export class OdysseySceneDesc implements Viewer.SceneDesc {
@@ -359,8 +364,11 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
             }
 
             if (entry.ObjectList !== undefined) {
-                for (let i = 0; i < entry.ObjectList.length; i++)
-                    resourceSystem.fetchData(device, dataFetcher, `ObjectData/${entry.ObjectList[i].UnitConfigName}`);
+                for (let i = 0; i < entry.ObjectList.length; i++) {
+                    const stageObject = entry.ObjectList[i];
+                    const objectName = (stageObject as any).ModelName ?? stageObject.UnitConfigName;
+                    resourceSystem.fetchData(device, dataFetcher, `ObjectData/${objectName}`);
+                }
             }
             if (entry.ZoneList !== undefined) {
                 for (let i = 0; i < entry.ZoneList.length; i++)
@@ -372,7 +380,8 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
             if (entry.ObjectList !== undefined) {
                 for (let i = 0; i < entry.ObjectList.length; i++) {
                     const stageObject = entry.ObjectList[i];
-                    const fmdlData = resourceSystem.getFMDLData(device, `ObjectData/${stageObject.UnitConfigName}`);
+                    const objectName = (stageObject as any).ModelName ?? stageObject.UnitConfigName;
+                    const fmdlData = resourceSystem.getFMDLData(device, `ObjectData/${objectName}`);
                     if (fmdlData === null)
                         continue;
 

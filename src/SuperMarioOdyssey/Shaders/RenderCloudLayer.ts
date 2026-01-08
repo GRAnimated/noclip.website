@@ -52,18 +52,19 @@ out vec2 v_TexCoord0;
 out vec4 v_VtxColor;
 
 void main() {
-    vec3 t_PositionView = multMtx34Vec3(u_ModelView, _p0);
+    vec3 worldPos  = UnpackMatrix(u_Model) * vec4(_p0, 1.0);
+
+    vec3 viewPos = multMtx34Vec3(mdlEnvView.cView, worldPos);
     
-    gl_Position = multMtx44Vec4(u_Projection, vec4(t_PositionView, 1.0));
+    gl_Position = UnpackMatrix(u_Projection) * vec4(viewPos, 1.0);
 
-    v_ViewPos = vec4(t_PositionView, 1.0);
-
+    v_ViewPos = vec4(viewPos, 1.0);
     v_TexCoord0 = _u0;
     v_VtxColor = _c0;
 
-    v_Normal = normalize(rotMtx34Vec3(u_ModelView, _n0.xyz));
-    
-    vec3 tangent = normalize(rotMtx34Vec3(u_ModelView, _t0.xyz));
+    v_Normal = normalize((UnpackMatrix(u_Model) * vec4(_n0.xyz, 0.0)).xyz);
+
+    vec3 tangent = normalize((UnpackMatrix(u_Model) * vec4(_t0.xyz, 0.0)).xyz);
     v_Tangents.xyz = tangent;
     v_Tangents.w = _t0.w;
 

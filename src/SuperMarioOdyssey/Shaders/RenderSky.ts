@@ -40,8 +40,15 @@ layout(location = 4) in vec4 _t0;
 out vec2 v_TexCoord0;
 
 void main() {
-    vec3 viewPos = multMtx34Vec3(u_ModelView, _p0);
-    vec4 clip = multMtx44Vec3(u_Projection, viewPos);
+    Mat3x4 view = u_View;
+
+    view.mx.w = 0.0;
+    view.my.w = 0.0;
+    view.mz.w = 0.0;
+
+    vec3 worldPos = UnpackMatrix(u_Model) * vec4(_p0, 1.0);
+    vec3 viewPos = UnpackMatrix(view) * vec4(worldPos, 1.0);
+    vec4 clip = UnpackMatrix(u_Projection) * vec4(viewPos, 1.0);
 
     gl_Position = vec4(clip.xy, clip.z, clip.w);
     

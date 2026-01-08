@@ -14,7 +14,7 @@ import { TextureAddressMode, FilterMode, IndexFormat, AttributeFormat, getChanne
 import { nArray, assert, assertExists } from '../util.js';
 import { fillMatrix4x4, fillMatrix4x3 } from '../gfx/helpers/UniformBufferHelpers.js';
 import { mat3, mat4, vec2, vec3, vec4 } from "gl-matrix";
-import { computeViewMatrix, computeViewSpaceDepthFromWorldSpaceAABB } from '../Camera.js';
+import { CameraController, computeViewMatrix, computeViewSpaceDepthFromWorldSpaceAABB } from '../Camera.js';
 import { AABB } from '../Geometry.js';
 import { reverseDepthForCompareMode } from '../gfx/helpers/ReversedDepthHelpers.js';
 import { DeviceProgram } from '../Program.js';
@@ -22,7 +22,7 @@ import { GfxRenderCache } from '../gfx/render/GfxRenderCache.js';
 import { GfxRenderHelper } from '../gfx/render/GfxRenderHelper.js';
 import { makeBackbufferDescSimple, standardFullClearRenderPassDescriptor } from '../gfx/helpers/RenderGraphHelpers.js';
 import { setAttachmentStateSimple } from '../gfx/helpers/GfxMegaStateDescriptorHelpers.js';
-import { GfxrAttachmentSlot, GfxrRenderTargetID } from '../gfx/render/GfxRenderGraph.js';
+import { GfxrAttachmentSlot, GfxrRenderTargetDescription, GfxrRenderTargetID, GfxrTemporalTexture } from '../gfx/render/GfxRenderGraph.js';
 import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { GfxShaderLibrary } from '../gfx/helpers/GfxShaderLibrary.js';
 import { createBufferFromData, createBufferFromSlice } from '../gfx/helpers/BufferHelpers.js';
@@ -30,14 +30,34 @@ import { generateShaderUtil } from './Shaders/ShaderUtil.js';
 import { OdysseySceneDesc, GraphicsPreset, OdysseyRenderer } from './Scenes.js';
 import { convertToCanvasData } from '../gfx/helpers/TextureConversionHelpers.js';
 import { MathConstants } from '../MathHelpers.js';
-import { OdysseyProgram } from './OdysseyProgram.js';
+import { bindingLayouts, OdysseyProgram } from './OdysseyProgram.js';
 import { RenderMaterial } from './Shaders/RenderMaterial.js';
 import { RenderSky } from './Shaders/RenderSky.js';
 import { fillHdrComposeUniforms, HdrCompose } from './Shaders/HdrCompose.js';
 import { RenderCloudLayer } from './Shaders/RenderCloudLayer.js';
+import { LinearDepth } from './Shaders/LinearDepth.js';
 
 export class BRTITextureHolder extends TextureHolder {
     public cubeMapSuffixName: string = '';
+
+    public linearDepthTexture: GfxTexture;
+    public framebufferTexture = new GfxrTemporalTexture();
+
+    public createLinearDepthTexture(device: GfxDevice, width: number, height: number): void {
+        if (this.linearDepthTexture) {
+            device.destroyTexture(this.linearDepthTexture);
+        }
+
+        this.linearDepthTexture = device.createTexture({
+            dimension: GfxTextureDimension.n2D,
+            pixelFormat: GfxFormat.F32_RGBA,
+            width,
+            height,
+            depthOrArrayLayers: 1,
+            numLevels: 1,
+            usage: GfxTextureUsage.Sampled | GfxTextureUsage.RenderTarget,
+        });
+    }
 
     public addFRESTextures(device: GfxDevice, fres: FRES): void {
         const bntxFile = fres.externalFiles.find((f) => f.name === 'textures.bntx');
@@ -479,7 +499,7 @@ class FMATInstance {
         // Fill in our texture mappings.
         assert(fmat.samplerInfo.length === fmat.textureName.length);
 
-        this.textureMapping = nArray(12, () => new TextureMapping());
+        this.textureMapping = nArray(14, () => new TextureMapping());
         for (let i = 0; i < fmat.samplerInfo.length; i++) {
             const samplerInfo = fmat.samplerInfo[i];
             const gfxSampler = cache.createSampler({
@@ -526,6 +546,12 @@ class FMATInstance {
 
         textureHolder.fillTextureMapping(this.textureMapping[OdysseyProgram._e0], "Exposure");
         this.textureMapping[OdysseyProgram._e0].gfxSampler = lutSampler;
+
+        this.textureMapping[OdysseyProgram._ld0].gfxTexture = textureHolder.linearDepthTexture;
+        this.textureMapping[OdysseyProgram._ld0].gfxSampler = lutSampler;
+
+        this.textureMapping[OdysseyProgram._fb0].gfxTexture = textureHolder.framebufferTexture.getTextureForSampling();
+        this.textureMapping[OdysseyProgram._fb0].gfxSampler = lutSampler;
 
         this.gfxProgram = cache.createProgram(this.program);
 
@@ -1206,11 +1232,11 @@ class FSHPInstance {
         d[offs++] = viewerInput.camera.worldMatrix[14];
         offs += 1; // padding
 
-        const fog = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1 };
-        const yFog = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1 };
+        let fog = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1 };
+        let yFog = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1 };
         if (preset !== null) {
-            const fog = preset.Fog;
-            const yFog = preset.YFog;
+            fog = preset.Fog;
+            yFog = preset.YFog;
         }
 
         // Fog parameters
@@ -1231,8 +1257,8 @@ class FSHPInstance {
         d[offs++] = yFog.Color.R / 255.0;
         d[offs++] = yFog.Color.G / 255.0;
         d[offs++] = yFog.Color.B / 255.0;
-        // d[offs++] = yFog.IsEnable ? yFog.Slope / 1000.0 : 0.0;
-        d[offs++] = 0.0; // TODO: y fog is broken
+        d[offs++] = yFog.IsEnable ? yFog.Slope / 1000.0 : 0.0;
+        // d[offs++] = 0.0; // TODO: y fog is broken
         
         d[offs++] = yFog.Start;
         d[offs++] = yFog.Max;
@@ -1267,11 +1293,12 @@ class FSHPInstance {
         const template = renderInstManager.pushTemplate();
 
         // ub_ShapeParams
-        let offs = template.allocateUniformBuffer(OdysseyProgram.ub_ShapeParams, 16+12);
+        let offs = template.allocateUniformBuffer(OdysseyProgram.ub_ShapeParams, 16+12+12);
         const d = template.mapUniformBufferF32(OdysseyProgram.ub_ShapeParams);
         offs += fillMatrix4x4(d, offs, viewerInput.camera.projectionMatrix);
-        offs += fillMatrix4x3(d, offs, this.computeModelView(modelMatrix, viewerInput));
-         
+        offs += fillMatrix4x3(d, offs, viewerInput.camera.viewMatrix);
+        offs += fillMatrix4x3(d, offs, modelMatrix);
+
         // ub_MdlEnvView has camera, environment, now ub_HDRTranslate, and now fog data
         const mdlEnvOffs = template.allocateUniformBuffer(OdysseyProgram.ub_MdlEnvView, 148);
         const envData = template.mapUniformBufferF32(OdysseyProgram.ub_MdlEnvView);
@@ -1305,22 +1332,6 @@ class FSHPInstance {
         renderInstManager.popTemplate();
     }
 }
-
-const bindingLayouts: GfxBindingLayoutDescriptor[] = [
-    { numUniformBuffers: 4, numSamplers: 11, samplerEntries: [
-        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
-        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
-        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
-        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
-        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
-        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
-        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
-        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
-        { dimension: GfxTextureDimension.Cube, formatKind: GfxSamplerFormatKind.Float, },
-        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.UnfilterableFloat, },
-        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.UnfilterableFloat, },
-    ] }
-];
 
 export class FMDLRenderer {
     public fmatInst: FMATInstance[] = [];
@@ -1410,6 +1421,8 @@ export class BasicFRESRenderer {
 
     private hdrComposeProgram: HdrCompose;
     private hdrComposeGfxProgram: GfxProgram;
+    private linearDepthProgram: LinearDepth;
+    private linearDepthGfxProgram: GfxProgram;
     private hdrTexture: GfxTexture | null = null;
     private exposureTexture: GfxTexture | null = null;
     private fullscreenVertexBuffer: GfxBuffer | null = null;
@@ -1418,6 +1431,7 @@ export class BasicFRESRenderer {
 
     private exposureSlider: UI.Slider;
     private enableHDR: UI.Checkbox;
+    private justChangedHDR: boolean = false;
     private useOriginalExposure: UI.Checkbox;
 
     private exposure: number = 0.05;
@@ -1430,6 +1444,11 @@ export class BasicFRESRenderer {
 
         this.hdrComposeProgram = new HdrCompose();
         this.hdrComposeGfxProgram = this.renderHelper.renderCache.createProgram(this.hdrComposeProgram);
+
+        this.linearDepthProgram = new LinearDepth();
+        this.linearDepthGfxProgram = this.renderHelper.renderCache.createProgram(this.linearDepthProgram);
+
+        this.textureHolder.createLinearDepthTexture(device, 1, 1);
         
         this.createFullscreenQuad(device);
         this.createExposureTexture(device, textureHolder);
@@ -1498,7 +1517,7 @@ export class BasicFRESRenderer {
         cameraPanel.setTitle(UI.RENDER_HACKS_ICON, 'Camera Debug');
 
         this.exposureSlider = new UI.Slider();
-        this.exposureSlider.setRange(0, 2, 0.001);
+        this.exposureSlider.setRange(0, 0.5, 0.001);
         this.exposureSlider.setLabel("Exposure: " + this.exposureSlider.getValue());
         this.exposureSlider.setValue(0.05);
         this.exposureSlider.onvalue = () => {
@@ -1510,9 +1529,12 @@ export class BasicFRESRenderer {
 
         this.enableHDR = new UI.Checkbox("Enable HDR");
         this.enableHDR.checked = false;
+        this.enableHDR.onchanged = () => {
+            this.justChangedHDR = true;
+        }
         cameraPanel.contents.appendChild(this.enableHDR.elem);
 
-        this.useOriginalExposure = new UI.Checkbox("Use Original Exposure");;
+        this.useOriginalExposure = new UI.Checkbox("Use Original Exposure");
         this.useOriginalExposure.checked = false;
         cameraPanel.contents.appendChild(this.useOriginalExposure.elem);
         this.useOriginalExposure.onchanged = () => {
@@ -1612,16 +1634,87 @@ export class BasicFRESRenderer {
         return ldrColorTargetID;
     }
 
+    private renderLinearDepth(device: GfxDevice, builder: any, mainDepthTargetID: GfxrRenderTargetID, viewerInput: Viewer.ViewerRenderInput): GfxrRenderTargetID {
+        const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
+        mainDepthDesc.pixelFormat = GfxFormat.F32_RGBA;
+        
+        const linearDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Linear Depth');
+
+        builder.pushPass((pass: any) => {
+            pass.setDebugName('Linear Depth');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, linearDepthTargetID);
+            
+            const mainDepthResolveTextureID = builder.resolveRenderTarget(mainDepthTargetID);
+            pass.attachResolveTexture(mainDepthResolveTextureID);
+            
+            const template = this.renderHelper.pushTemplateRenderInst();
+            template.setBindingLayouts(LinearDepth.bindingLayouts);
+
+            pass.exec((passRenderer: any, scope: any) => {
+                const depthTexture = scope.getResolveTextureForID(mainDepthResolveTextureID);
+                
+                const renderInst = this.renderHelper.renderInstManager.newRenderInst();
+                
+                // Uniforms
+                let offs = renderInst.allocateUniformBuffer(LinearDepth.ub_LinearDepthInfo, 4);
+                const d = renderInst.mapUniformBufferF32(LinearDepth.ub_LinearDepthInfo);
+
+                d[offs++] = viewerInput.camera.near;
+                d[offs++] = viewerInput.camera.far;
+                offs += 2; // padding
+                
+                const textureMapping = new TextureMapping();
+                textureMapping.gfxTexture = depthTexture;
+                textureMapping.gfxSampler = this.renderHelper.renderCache.createSampler({
+                    wrapS: GfxWrapMode.Clamp,
+                    wrapT: GfxWrapMode.Clamp,
+                    minFilter: GfxTexFilterMode.Bilinear,
+                    magFilter: GfxTexFilterMode.Bilinear,
+                    mipFilter: GfxMipFilterMode.Nearest,
+                    minLOD: 0, maxLOD: 0,
+                });
+                
+                renderInst.setSamplerBindingsFromTextureMappings([textureMapping]);
+                
+                // Setup geometry
+                renderInst.setVertexInput(
+                    this.fullscreenInputLayout!,
+                    [{ buffer: this.fullscreenVertexBuffer!, byteOffset: 0 }],
+                    { buffer: this.fullscreenIndexBuffer!, byteOffset: 0 }
+                );
+                renderInst.setDrawCount(6);
+                
+                renderInst.setGfxProgram(this.linearDepthGfxProgram);
+                renderInst.setMegaStateFlags({
+                    cullMode: GfxCullMode.None,
+                    depthCompare: GfxCompareMode.Always,
+                    depthWrite: false,
+                });
+                
+                renderInst.drawOnPass(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+
+        return linearDepthTargetID;
+    }
+
     public render(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput) {
         const renderInstManager = this.renderHelper.renderInstManager;
+
+        const width  = viewerInput.backbufferWidth;
+        const height = viewerInput.backbufferHeight;
+
+        if (!this.textureHolder.linearDepthTexture ||
+            this.textureHolder.linearDepthTexture.width  !== width ||
+            this.textureHolder.linearDepthTexture.height !== height) {
+            this.textureHolder.createLinearDepthTexture(device, width, height);
+        }
 
         const builder = this.renderHelper.renderGraph.newGraphBuilder();
 
         const hdrColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
-        if (this.enableHDR.checked)
-            hdrColorDesc.pixelFormat = GfxFormat.F16_RGBA;
-        else
-            hdrColorDesc.pixelFormat = viewerInput.onscreenTexture.pixelFormat;
+        
+        this.textureHolder.framebufferTexture.setDescription(device, hdrColorDesc);
         
         const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, viewerInput, standardFullClearRenderPassDescriptor);
 
@@ -1651,8 +1744,28 @@ export class BasicFRESRenderer {
         });
 
         const finalColorTargetID = this.renderHdrCompose(device, builder, hdrColorTargetID, viewerInput);
-        
+
         this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, finalColorTargetID);
+        
+        /*
+        builder.pushPass((pass) => {
+            pass.setDebugName('Copy to Framebuffer Texture');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, finalColorTargetID);
+        });
+        builder.resolveRenderTargetToExternalTexture(finalColorTargetID, this.textureHolder.framebufferTexture.getTextureForResolving());
+
+        builder.pushPass((pass) => {
+            pass.setDebugName('Copy to Onscreen Texture');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, finalColorTargetID);
+        });
+        builder.resolveRenderTargetToExternalTexture(finalColorTargetID, viewerInput.onscreenTexture);
+
+        const linearDepthTargetID = this.renderLinearDepth(device, builder, mainDepthTargetID, viewerInput);
+        builder.resolveRenderTargetToExternalTexture(linearDepthTargetID, this.textureHolder.linearDepthTexture);
+        */
+
+
+
         builder.resolveRenderTargetToExternalTexture(finalColorTargetID, viewerInput.onscreenTexture);
 
         this.prepareToRender(device, viewerInput);
@@ -1663,6 +1776,7 @@ export class BasicFRESRenderer {
 
     public destroy(device: GfxDevice): void {
         this.renderHelper.destroy();
+        this.textureHolder.framebufferTexture.destroy(device);
         
         if (this.hdrTexture)
             device.destroyTexture(this.hdrTexture);
