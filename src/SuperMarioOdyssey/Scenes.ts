@@ -17,7 +17,7 @@ import { CameraController } from '../Camera.js';
 
 const pathBase = `SuperMarioOdyssey`;
 const addon = `SuperMarioOdysseyMod`;
-const ENABLE_MODDED = false;
+const ENABLE_MODDED = true;
 
 class ResourceSystem {
     public textureHolder = new BRTITextureHolder();
@@ -31,9 +31,18 @@ class ResourceSystem {
         this.renderCache = new GfxRenderCache(device);
     }
 
-    private loadResource(device: GfxDevice, mountName: string, sarc: SARC.SARC): void {
+    private loadResource(device: GfxDevice, dataFetcher: DataFetcher, mountName: string, sarc: SARC.SARC): void {
         assert(!this.mounts.has(mountName));
         this.mounts.set(mountName, sarc);
+
+        const initModelFile = sarc.files.find((f) => f.name === 'InitModel.byml');
+        if (initModelFile) {
+            const initModel = BYML.parse(initModelFile.buffer) as any;
+            const textureArc: string = initModel.TextureArc;
+            if (textureArc && !this.arcPromiseCache.has(`ObjectData/${textureArc}`)) {
+                this.fetchData(device, dataFetcher, `ObjectData/${textureArc}`);
+            }
+        }
 
         for (let i = 0; i < sarc.files.length; i++) {
             if (!sarc.files[i].name.endsWith('.bfres'))
@@ -69,7 +78,7 @@ class ResourceSystem {
         const decompressed = await Yaz0.decompress(buffer);
         const sarc = SARC.parse(decompressed);
 
-        this.loadResource(device, arcPath, sarc);
+        this.loadResource(device, dataFetcher, arcPath, sarc);
         return sarc;
     }
 
@@ -80,7 +89,12 @@ class ResourceSystem {
     }
 
     public waitForLoad(): Promise<void> {
-        return Promise.all(this.arcPromiseCache.values()) as unknown as Promise<void>;
+        return Promise.all([
+            ...this.arcPromiseCache.values(),
+            ...this.textureHolder.pendingUploads,
+        ]).then(() => {
+            this.textureHolder.pendingUploads.length = 0;
+        }) as unknown as Promise<void>;
     }
 
     public findFRES(mountName: string): BFRES.FRES | null {
@@ -257,8 +271,6 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
         
         const sceneRenderer = new OdysseyRenderer(device, resourceSystem);
         const cache = sceneRenderer.renderHelper.renderCache;
-
-        resourceSystem.fetchData(device, dataFetcher, `ObjectData/${world.Name}Texture`);
 
         const spawnZone = async (stageName: string, placement: mat4, isMap: boolean) => {
             console.log('Spawning stage:', stageName + (isMap ? ' (map)' : ''));

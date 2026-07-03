@@ -61,6 +61,7 @@ class GroupedTextureHolder implements UI.TextureListHolder {
     public viewerTextures: Viewer.Texture[] = [];
     public _textureNames: string[] = [];
     public onnewtextures: (() => void) | null = null;
+    public pendingUploads: Promise<void>[] = [];
     private entries: TextureEntry[] = [];
 
     // scopeId to flat index
@@ -207,13 +208,25 @@ export class BRTITextureHolder extends GroupedTextureHolder {
     }
 
     public addScopedTexture(device: GfxDevice, textureEntry: BNTX.BRTI, scope: TextureScopeKey): void {
-        const gfxTexture = device.createTexture(makeTextureDescriptor2D(translateImageFormat(textureEntry.imageFormat), textureEntry.width, textureEntry.height, textureEntry.mipBuffers.length));
+        // some modded textures declare more levels than their dimensions support
+        const maxDim = Math.max(textureEntry.width, textureEntry.height);
+        const maxMips = maxDim > 0 ? Math.floor(Math.log2(maxDim)) + 1 : 1;
+        const numLevels = Math.max(1, Math.min(textureEntry.mipBuffers.length, maxMips));
+
+        let gfxTexture: GfxTexture;
+        try {
+            gfxTexture = device.createTexture(makeTextureDescriptor2D(translateImageFormat(textureEntry.imageFormat), textureEntry.width, textureEntry.height, numLevels));
+        } catch (e) {
+            console.error(`texture creation failed: ${textureEntry.name}:`, e);
+            return;
+        }
         const canvases: HTMLCanvasElement[] = [];
 
         const channelFormat = getChannelFormat(textureEntry.imageFormat);
 
-        // for (let i = 0; i < textureEntry.mipBuffers.length; i++) {
-        for (let i = 0; i < textureEntry.mipBuffers.length; i++) {
+        const uploadPromises: Promise<void>[] = [];
+
+        for (let i = 0; i < numLevels; i++) {
             const mipLevel = i;
 
             const buffer = textureEntry.mipBuffers[i] as ArrayBufferSlice;
@@ -221,7 +234,7 @@ export class BRTITextureHolder extends GroupedTextureHolder {
             const height = Math.max(textureEntry.height >>> mipLevel, 1);
             const depth = 1;
             const blockHeightLog2 = textureEntry.blockHeightLog2;
-            deswizzle({ buffer, width, height, channelFormat, blockHeightLog2 }).then((deswizzled) => {
+            const p = deswizzle({ buffer, width, height, channelFormat, blockHeightLog2 }).then((deswizzled) => {
                 const rgbaTexture = decompress({ ...textureEntry, width, height, depth }, deswizzled);
                 let rgbaPixels = rgbaTexture.pixels;
                 rgbaTexture.width = width;
@@ -233,7 +246,10 @@ export class BRTITextureHolder extends GroupedTextureHolder {
                 surfaceToCanvas(canvas, rgbaTexture);
                 canvases.push(canvas);
             });
+            uploadPromises.push(p);
         }
+
+        this.pendingUploads.push(Promise.all(uploadPromises).then(() => {}));
 
         const extraInfo = new Map<string, string>();
         extraInfo.set('Format', getImageFormatString(textureEntry.imageFormat));
@@ -245,7 +261,8 @@ export class BRTITextureHolder extends GroupedTextureHolder {
 
     public addCubemapTexture(device: GfxDevice, textureEntry: BNTX.BRTI, scope: TextureScopeKey): void {
         const numFaces = 6;
-        const numMips = textureEntry.mipBuffers.length;
+        const maxMips = Math.floor(Math.log2(Math.max(textureEntry.width, textureEntry.height))) + 1;
+        const numMips = Math.min(textureEntry.mipBuffers.length, maxMips);
         const gfxTexture = device.createTexture({
             dimension: GfxTextureDimension.Cube,
             pixelFormat: translateImageFormat(textureEntry.imageFormat),
@@ -618,9 +635,8 @@ class FMATInstance {
             const textureName = fmat.textureName[i];
             const scope: TextureScopeKey = {archiveName: this.archiveName};
 
-            // console.log(`Filling: ${this.archiveName} with scope ${JSON.stringify(scope)}`);
-            
-            if (!textureHolder.fillScopedTextureMapping(this.textureMapping[i], textureName, scope)) {
+            const foundScoped = textureHolder.fillScopedTextureMapping(this.textureMapping[i], textureName, scope);
+            if (!foundScoped) {
                 textureHolder.fillTextureMapping(this.textureMapping[i], textureName);
             }
 
@@ -1030,9 +1046,11 @@ function translateAttributeFormat(attributeFormat: AttributeFormat): GfxFormat {
         return GfxFormat.F32_RG;
     case AttributeFormat._32_32_32_Float:
         return GfxFormat.F32_RGB;
+    case AttributeFormat._32_32_32_32_Float:
+        return GfxFormat.F32_RGBA;
     default:
-        console.error(getChannelFormat(attributeFormat), getTypeFormat(attributeFormat));
-        throw "whoops";
+        console.warn('unhandled attribute format', getChannelFormat(attributeFormat), getTypeFormat(attributeFormat));
+        return GfxFormat.F32_R; // fallback :(
     }
 }
 

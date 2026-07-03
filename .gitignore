@@ -46,6 +46,7 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
+.npmrc
 node_modules
 
 rust/target/

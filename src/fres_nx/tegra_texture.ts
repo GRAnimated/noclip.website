@@ -147,7 +147,20 @@ export function decompress(textureEntry: BRTI, pixels: Uint8Array<ArrayBuffer>):
         return decompressBC({ ...textureEntry, type: 'BC5', flag: typeFormat === TypeFormat.Unorm ? 'UNORM' : 'SNORM', pixels } as DecodedSurfaceBC);
     case ChannelFormat.R8_G8_B8_A8:
         assert(typeFormat === TypeFormat.Unorm || typeFormat === TypeFormat.UnormSrgb);
-        return { ... textureEntry, type: 'RGBA', flag: typeFormat === TypeFormat.Unorm ? 'UNORM' : 'SRGB', pixels };
+        // trim padding to just capture the deswizzled texture data
+        return { ... textureEntry, type: 'RGBA', flag: typeFormat === TypeFormat.Unorm ? 'UNORM' : 'SRGB', pixels: pixels.subarray(0, textureEntry.width * textureEntry.height * 4) };
+    case ChannelFormat.B8_G8_R8_A8:
+        assert(typeFormat === TypeFormat.Unorm || typeFormat === TypeFormat.UnormSrgb);
+        // BGRA to RGBA and then trim
+        const pixelCount = textureEntry.width * textureEntry.height;
+        const rgba = new Uint8Array(pixelCount * 4);
+        for (let i = 0; i < pixelCount; i++) {
+            rgba[i * 4 + 0] = pixels[i * 4 + 2]; // b to r
+            rgba[i * 4 + 1] = pixels[i * 4 + 1]; // g to g
+            rgba[i * 4 + 2] = pixels[i * 4 + 0]; // r to b
+            rgba[i * 4 + 3] = pixels[i * 4 + 3]; // a
+        }
+        return { ... textureEntry, type: 'RGBA', flag: typeFormat === TypeFormat.Unorm ? 'UNORM' : 'SRGB', pixels: rgba };
     default:
         console.error(channelFormat.toString(16));
         throw "whoops";
@@ -166,8 +179,10 @@ function getChannelFormatString(channelFormat: ChannelFormat): string {
         return 'BC5';
     case ChannelFormat.R8_G8_B8_A8:
         return 'R8_G8_B8_A8';
+    case ChannelFormat.B8_G8_R8_A8:
+        return 'B8_G8_R8_A8';
     default:
-        throw "whoops";
+        return `0x${channelFormat.toString(16)}`;
     }
 }
 
