@@ -1,5 +1,4 @@
 import { FMAT } from "../../fres_nx/bfres.js";
-import { assert } from "../../util.js";
 import { MaterialUniforms, OdysseyProgram, ubMaterial, ubMdlEnvView, ubModelAdditionalInfo, ubShapeParams } from "../OdysseyProgram.js";
 import { generateFogCode } from "./FogUtil.js";
 import { generateShaderUtil } from "./ShaderUtil.js";
@@ -7,10 +6,8 @@ import { generateShaderUtil } from "./ShaderUtil.js";
 export class RenderMaterial extends OdysseyProgram {
     public isTranslucent: boolean = false;
 
-    constructor(fmat: FMAT) {
+    constructor(fmat: FMAT, private isRippleMaterial: boolean = false) {
         super(fmat);
-
-        assert(this.fmat.samplerInfo.length <= 8);
 
         if (this.getShaderOptionNumber('vtxcolor_type') >= 0)
             this.defines.set('OPT_vtxcolor', '1');
@@ -20,7 +17,22 @@ export class RenderMaterial extends OdysseyProgram {
             alphaIsTranslucent = this.outputIsTranslucent('o_alpha');
         } catch (e) {}
 
-        this.isTranslucent = alphaIsTranslucent && !this.getShaderOptionBoolean(`enable_alphamask`);
+        // cRenderType == 3 uses render info forward_xlu to decide Opa vs XLU
+        // so treat type 3 as potentially translucent
+
+        const renderType = this.getShaderOptionNumber('cRenderType');
+        const forwardXluInfo = fmat.renderInfo.get('forward_xlu');
+        const forwardXlu = forwardXluInfo !== undefined && forwardXluInfo.values.length > 0 ? forwardXluInfo.values[0] as string : 'Opa';
+        const deferredXluInfo = fmat.renderInfo.get('deferred_xlu');
+        const deferredXlu = deferredXluInfo !== undefined && deferredXluInfo.values.length > 0 ? deferredXluInfo.values[0] as string : '';
+        const additiveXlu = forwardXlu.includes('Add') || deferredXlu.includes('Add');
+        if (additiveXlu)
+            this.defines.set('OPT_ADDITIVE_XLU', '1');
+        const renderTypeIsXlu = renderType === 1 || (renderType === 3 && forwardXlu !== 'Opa');
+        this.isTranslucent = (alphaIsTranslucent || this.getShaderOptionBoolean('enable_transparent') || renderTypeIsXlu) && !this.getShaderOptionBoolean(`enable_alphamask`);
+
+        if (isRippleMaterial)
+            this.defines.set('OPT_RIPPLE_MATERIAL', '1');
 
 this.both += `
 ${ubShapeParams}
@@ -49,34 +61,35 @@ void CalcLdrToHdr(out vec4 hdr, vec4 ldr) {
     hdr = vec4(ldr.rgb * scale, scale);
 }
 
+vec4 DecodeCubemap(samplerCube cube, vec3 n, float lod)
+{
+    vec4 tex = textureLod(cube, n, lod);
+    // SMO cubemaps are encoded with power 4 and range 1024 based on al::HdrEncode's constructor
+    float scale = pow(tex.a, 4.0) * 1024.0;
+    return vec4(tex.rgb * scale, scale);
+}
+
 vec4 fetchCubeMap(samplerCube cube, vec3 dir, float bias) {
-    vec4 tex = textureLod(cube, dir, bias);
-    return tex;
+    return textureLod(cube, dir, bias);
 }
 
 vec4 fetchCubeMapConvertHdr(samplerCube cube, vec3 dir, float bias) {
-    vec4 tex = textureLod(cube, dir, bias);
-
-    CalcLdrToHdr(tex, tex);
-    return tex;
+    return DecodeCubemap(cube, dir, bias);
 }
 
 vec4 fetchCubeMapIrradiance(samplerCube cube, vec3 dir) {
-    vec4 tex = textureLod(cube, dir, 5.0);
-    return tex;
+    return textureLod(cube, dir, 5.0);
 }
 
 vec4 fetchCubeMapIrradianceConvertHdr(samplerCube cube, vec3 dir) {
-    vec4 tex = textureLod(cube, dir, 5.0);
-
-    CalcLdrToHdr(tex, tex);
-    return tex;
+    return DecodeCubemap(cube, dir, 5.0);
 }
 `;
 
 this.frag = `
 in vec3 v_Normal;
 in vec3 v_WorldPos;
+in vec3 v_LocalPos;
 in float v_Depth;
 in vec4 v_Tangents;
 in vec4 v_Bitangents;
@@ -112,7 +125,15 @@ vec2 SelectTexCoord(int mtx_select)
         return indirectCoords.zw;
     else if  (mtx_select == 30) //sphere mapping
         return v_SphereCoords.xy;
-    else //TODO 50 - 54 are proj texture types
+    else if (mtx_select == 50) //proj texture 0
+        return (vec4(v_LocalPos.xyz, 1.0) * modelInfo.proj_mtx0).xy;
+    else if (mtx_select == 51) //proj texture 1
+        return (vec4(v_LocalPos.xyz, 1.0) * modelInfo.proj_mtx1).xy;
+    else if (mtx_select == 52) //proj texture 2
+        return (vec4(v_LocalPos.xyz, 1.0) * modelInfo.proj_mtx2).xy;
+    else if (mtx_select == 53) //proj texture 3
+        return (vec4(v_LocalPos.xyz, 1.0) * modelInfo.proj_mtx3).xy;
+    else
         return v_TexCoord0.xy;
 }
 
@@ -132,10 +153,11 @@ vec4 CalculateUniform(sampler2D cTexture, int uv_selector, bool enable, vec4 mul
     bool enable_mul_color, bool enable_mul_vtx_color, bool enable_roughness_lod, vec2 tex_bias)
 {
     vec4 uniform_output = vec4(1.0);
-    if (enable) //Todo third argument uses MdlEnvView.data[0x12A].x, a global LOD value
-        uniform_output = texture(cTexture, SelectTexCoord(uv_selector) + tex_bias);
+    vec2 uv = SelectTexCoord(uv_selector);
+    if (enable)
+        uniform_output = texture(cTexture, uv + tex_bias, mdlEnvView.cGlobalLodBias);
     if (enable_roughness_lod)
-        uniform_output = textureLod(cTexture, SelectTexCoord(uv_selector), 0.0);
+        uniform_output = textureLod(cTexture, uv, 0.0);
     if (enable_mul_color)
         uniform_output *= mul_color;
     if (enable_mul_vtx_color)
@@ -144,41 +166,29 @@ vec4 CalculateUniform(sampler2D cTexture, int uv_selector, bool enable, vec4 mul
     return uniform_output;
 }
 
-vec3 calcSpecularGGX(float roughness, vec3 f0, vec3 N, vec3 V, vec3 L, vec3 H)
+vec3 calcSpecularGGX(float roughness, float metalness, vec3 f0, vec3 N, vec3 V, vec3 L, vec3 H)
 {
-	float N_H = saturate(dot(N, H));
-	float L_H = saturate(dot(L, H));
-	float N_V = saturate(dot(N, V));
-	float N_L = saturate(dot(N, L));
+    float N_H = saturate(dot(N, H));
+    float L_H = saturate(dot(L, H));
+    float N_V = saturate(dot(N, V));
+    float N_L = saturate(dot(N, L));
 
-    // Distribution term (D)
+    // GGX normal distribution term
     float alpha = roughness * roughness;
-    float alpha_2 = alpha * alpha;
-    float denom = N_H * N_H * (alpha_2 - 1.0) + 1.0;
-    float pi_denom_2 = PI * denom * denom;
-    float D = alpha_2 / max(pi_denom_2, 0.0005);
+    float alpha2 = alpha * alpha;
+    float denom = N_H * N_H * (alpha2 - 1.0) + 1.0;
+    float piDenom2 = PI * denom * denom;
+    float D = alpha2 / max(piDenom2, 0.0005);
 
-    // Fresnel term (F)
+    // Schlick Fresnel and visibility term based on alLightingFunction.glsl's FV_Helper
     float dotLH5 = pow(1.0 - L_H, 5.0);
-    float F_a = 1.0;
-    float F_b = dotLH5;
-    
-    // Visibility/Geometry term (V)
     float k = alpha * 0.5;
     float k2 = k * k;
-    float invK2 = 1.0 - k2;
-    float vis_numerator = abs(N_V) * N_L;
-    float vis = vis_numerator / (L_H * L_H * invK2 + k2);
-    
-    // Combine F and V
-    vec2 FV_helper;
-    FV_helper.x = (F_a - F_b) * vis;
-    FV_helper.y = F_b * vis;
-    vec3 FV = f0 * FV_helper.x + FV_helper.y;
-    
-    // Final specular with cavity coefficient approximation
-    float spc_cavity_coef = mix(1.0 - roughness * roughness, 1.0, 0.0) * 0.5; // metalness would go here
-    return FV * (N_L * D * spc_cavity_coef);
+    float vis = (abs(N_V) * N_L) / (L_H * L_H * (1.0 - k2) + k2);
+    vec3 FV = f0 * ((1.0 - dotLH5) * vis) + vec3(dotLH5 * vis);
+
+    float spcCavityCoef = mix(1.0 - roughness * roughness, 1.0, metalness) * 0.5;
+    return FV * (N_L * D * spcCavityCoef);
 }
 
 vec3 ReconstructNormal(in vec2 t_NormalXY) {
@@ -211,32 +221,13 @@ vec3 CalculateNormals(vec3 normals, vec2 normal_map)
     return world_normal;
 }
 
-/*
 float CalculateSphereLight() {
     vec3 vertex_normal = normalize(v_Normal);
     if (${this.getShaderOptionBoolean('is_use_back_face_lighting')} == true)
         vertex_normal = 1.0 - vertex_normal;
 
     vec3 view_normal = normalize(rotMtx34Vec3(mdlEnvView.cView, vertex_normal));
-    // vec3 view_pos = vec3(v_ViewPos.zw, v_LightColorVPosZ.w);
-    vec3 view_pos = v_ViewPos.xyz;
-
-    vec3 dir = normalize(view_pos);
-
-    return clamp(fma(dir.z, -view_normal.z,
-                    fma(dir.x, -view_normal.x, 
-                    dir.y * -view_normal.y)), 0.0, 1.0);
-}
-*/
-
-float CalculateSphereLight() {
-    vec3 vertex_normal = normalize(v_Normal);
-    if (${this.getShaderOptionBoolean('is_use_back_face_lighting')} == true)
-        vertex_normal = 1.0 - vertex_normal;
-
-    vec3 view_normal = normalize(rotMtx34Vec3(mdlEnvView.cView, vertex_normal));
-    // vec3 view_pos = vec3(v_ViewPos.zw, v_LightColorVPosZ.w);
-    vec3 view_pos = v_ViewPos.xyz;
+    vec3 view_pos = vec3(v_ViewPos.zw, v_LightColorVPosZ.w);
 
     vec3 dir = normalize(view_pos);
 
@@ -261,145 +252,20 @@ float calcFresnel(float hFresnelN, float V_H)
 }
 
 vec4 CalculateSphereConstColor(int sphere_color_type, vec4 const_color, float sphere_rate_color) {
-    float cosTheta = clamp(CalculateSphereLight(), 0.0, 1.0);
-    float bias = 0.05;
-    float NV = clamp(cosTheta + bias, 0.0, 1.0);
-
-    float hFresnelN = 0.05;
-
-    float F = calcFresnel(hFresnelN, NV);
-
-    float Fmin = hFresnelN;
-    float Fmax = 1.0;
-    float fresnelMask = clamp((F - Fmin) / (Fmax - Fmin), 0.0, 1.0);
-
-    float k = max(sphere_rate_color, 0.0001);
+    float cosTheta = CalculateSphereLight();
 
     if (sphere_color_type == 1) // inverted fresnel effect
     {
-        // float amount = clamp(exp2(log2(cosTheta) * sphere_rate_color), 0.0, 1.0);
-        float invMask = 1.0 - fresnelMask;
-        float amount = pow(invMask, k);
+        float amount = clamp(exp2(log2(cosTheta) * sphere_rate_color), 0.0, 1.0);
         return const_color * amount;
     }
     else if (sphere_color_type == 2) // fresnel effect
     {
-        //float amount = clamp(exp2(log2(1.0 - cosTheta) * sphere_rate_color), 0.0, 1.0);
-        float amount = pow(fresnelMask, k);
+        float amount = clamp(exp2(log2(1.0 - cosTheta) * sphere_rate_color), 0.0, 1.0);
         return const_color * amount;
     }
     else
         return const_color; // type 0 defaults to const color
-}
-
-vec4 CalculateProcTexture2D() {
-    // TODO: stub
-    return vec4(1.0, 1.0, 1.0, 1.0);
-}
-
-vec4 CalculateProcTexture3D() {
-    // TODO: stub
-    return vec4(1.0, 1.0, 1.0, 1.0);
-}
-
-vec4 CalculateBaseColor(vec2 tex_bias)
-{
-    vec4 basecolor_output = vec4(1.0);
-    if (${this.getShaderOptionBoolean('enable_base_color')}) //Todo third argument uses MdlEnvView.data[0x12A].x, a global LOD value
-        basecolor_output = (${this.genSample("_a0", this.selectTexCoord(this.getShaderOptionNumber('base_color_fuv_selector')), ' + tex_bias')});
-    if (${this.getShaderOptionBoolean('enable_base_color_mul_color')})
-        basecolor_output *= mat.base_color_mul_color;
-    if (${this.getShaderOptionNumber('vtxcolor_type') == 0}) // VTX_COLOR_TYPE_DIFFUSE
-        basecolor_output.rgb *= clamp01(v_VtxColor.rgb); // NOTE: Reference doesn't clamp here
-    else if (${this.getShaderOptionNumber('vtxcolor_type') == 3}) // VTX_COLOR_TYPE_DIFFUSE_BLEND
-       basecolor_output.rgb *= clamp01(1.0 - v_VtxColor.rgb * v_VtxColor.rgb); // NOTE: Same here
-
-    return basecolor_output;
-}
-
-vec4 BLEND0_OUTPUT;
-vec4 BLEND1_OUTPUT;
-vec4 BLEND2_OUTPUT;
-vec4 BLEND3_OUTPUT;
-vec4 BLEND4_OUTPUT;
-vec4 BLEND5_OUTPUT;
-
-vec4 CalculateOutput(int flag)
-{
-    if (flag == 10) return CalculateBaseColor(vec2(0.0));
-    else if (flag == 15) return v_VtxColor;
-    else if (flag == 20) {
-        // Normal map
-        return texture(u_Texture1, ${this.selectTexCoord(this.getShaderOptionNumber('normal_fuv_selector'))});
-    }
-    else if (flag == 30) return vec4(GetWorldNormal().xyz, 0.0); // World Normal
-
-    else if (flag == 50) return ${this.genUniform(0)};
-    else if (flag == 51) return ${this.genUniform(1)};
-    else if (flag == 52) return ${this.genUniform(2)};
-    else if (flag == 53) return ${this.genUniform(3)};
-    else if (flag == 54) return ${this.genUniform(4)};
-    else if (flag == 60) return mat.const_color0;
-    else if (flag == 61) return mat.const_color1;
-    else if (flag == 62) return mat.const_color2;
-    else if (flag == 63) return mat.const_color3;
-
-    else if (flag == 70) return texture(u_Texture0, v_TexCoord0); // FB sampler TODO
-    else if (flag == 78) return texture(u_Texture1, v_TexCoord0); // Depth sampler TODO
-
-    else if (flag == 80) return BLEND0_OUTPUT;
-    else if (flag == 81) return BLEND1_OUTPUT;
-    else if (flag == 82) return BLEND2_OUTPUT;
-    else if (flag == 83) return BLEND3_OUTPUT;
-    else if (flag == 84) return BLEND4_OUTPUT;
-    else if (flag == 85) return BLEND5_OUTPUT;
-
-    else if (flag == 110) return vec4(mat.const_single0);
-    else if (flag == 111) return vec4(mat.const_single1);
-    else if (flag == 112) return vec4(mat.const_single2);
-    else if (flag == 113) return vec4(mat.const_single3);
-
-    else if (flag == 115) return vec4(0.0);
-    else if (flag == 116) return vec4(1.0);
-    else if (flag == 140) return vec4(modelInfo.uv_offset, 0.0, 0.0);
-    else if (flag == 160) return CalculateProcTexture2D(); // ProcTexture2D
-    else if (flag == 170) return CalculateProcTexture3D();
-
-    return vec4(1.0, 0.0, 1.0, 1.0);
-}
-
-vec4 GetTransparentTexOutput(int flag, float bias_x, float bias_y)
-{
-    vec2 bias = vec2(bias_x, bias_y);
-
-    if (flag == 10)      return CalculateBaseColor(bias);
-    else if (flag == 50) return ${this.genUniform(0, 'bias')};
-    else if (flag == 51) return ${this.genUniform(1, 'bias')};
-    else if (flag == 52) return ${this.genUniform(2, 'bias')};
-    else if (flag == 53) return ${this.genUniform(3, 'bias')};
-    else if (flag == 54) return ${this.genUniform(4, 'bias')};
-    return vec4(0.0);
-}
-
-vec4 CalculateCofBlendOutput(int flag, int cof_map)
-{
-    if (flag == 10)      return v_VtxColor;
-    else if (flag == 20) return CalculateOutput(cof_map);
-
-    else if (flag == 30) return vec4(mat.const_single0);
-    else if (flag == 31) return vec4(mat.const_single1);
-    else if (flag == 32) return vec4(mat.const_single2);
-    else if (flag == 33) return vec4(mat.const_single3);
-
-    else if (flag == 60) return CalculateSphereConstColor(0, mat.const_color0, mat.sphere_rate_color0);
-    else if (flag == 61) return CalculateSphereConstColor(1, mat.const_color1, mat.sphere_rate_color1);
-    else if (flag == 62) return CalculateSphereConstColor(2, mat.const_color2, mat.sphere_rate_color2);
-    else if (flag == 63) return CalculateSphereConstColor(3, mat.const_color3, mat.sphere_rate_color3);
-
-    else if (flag == 115) return vec4(0.0);
-    else if (flag == 116) return vec4(1.0);
-
-    return vec4(0.0);
 }
 
 vec4 GetCompBlend(vec4 v, int comp_mask)
@@ -430,6 +296,156 @@ vec4 GetComp(vec4 v, int comp_mask)
     else if (comp_mask == 100) return clamp(1.0 - v.aaaa, 0.0, 1.0);
 
     return v.rgba;
+}
+
+vec4 CalculateProcTexture2D() {
+    if (${this.getShaderOptionBoolean('enable_proc_texture_2d')} == false)
+        return vec4(0.0);
+
+    vec2 tex_coords = SelectTexCoord(${this.getShaderOptionNumber('proc_texture_2d_fuv_selector')});
+    vec4 proc_tex = GetComp(texture(u_TextureProcTexture2D, tex_coords), ${this.getShaderOptionNumber('proc_texture_2d_component')});
+
+    if (${this.getShaderOptionBoolean('enable_proc_texture_2d_mul_color')} == true)
+        proc_tex *= mat.proc_texture_3d_mul_color;
+
+    if (${this.getShaderOptionBoolean('enable_proc_texture_2d_mul_vtxcolor')} == true)
+        proc_tex *= v_VtxColor;
+
+    return proc_tex;
+}
+
+vec4 CalculateProcTexture3D() {
+    if (${this.getShaderOptionBoolean('enable_proc_texture_3d')} == false)
+        return vec4(0.0);
+
+    vec3 tex_coords_3d = v_LocalPos.xyz * mat.proc_texture_3d_scale.xyz;
+    int fuv_offset = ${this.getShaderOptionNumber('proc_texture_3d_fuv_offset')};
+    if      (fuv_offset == 60) tex_coords_3d += mat.const_color0.xyz;
+    else if (fuv_offset == 61) tex_coords_3d += mat.const_color1.xyz;
+    else if (fuv_offset == 62) tex_coords_3d += mat.const_color2.xyz;
+    else if (fuv_offset == 63) tex_coords_3d += mat.const_color3.xyz;
+
+    vec4 proc_tex = GetComp(texture(u_TextureProcTexture3D, tex_coords_3d), ${this.getShaderOptionNumber('proc_texture_3d_component')});
+
+    if (${this.getShaderOptionBoolean('enable_proc_texture_3d_mul_color')} == true)
+        proc_tex *= mat.proc_texture_3d_mul_color;
+
+    if (${this.getShaderOptionBoolean('enable_proc_texture_3d_mul_vtxcolor')} == true)
+        proc_tex *= v_VtxColor;
+
+    return proc_tex;
+}
+
+vec4 CalculateBaseColor(vec2 tex_bias)
+{
+    vec4 basecolor_output = vec4(1.0);
+    if (${this.getShaderOptionBoolean('enable_base_color')})
+        basecolor_output = (${this.genSample("_a0", this.selectTexCoord(this.getShaderOptionNumber('base_color_fuv_selector')), ' + tex_bias, mdlEnvView.cGlobalLodBias')});
+    if (${this.getShaderOptionBoolean('enable_base_color_mul_color')})
+        basecolor_output *= mat.base_color_mul_color;
+    if (${this.getShaderOptionNumber('vtxcolor_type') == 0}) // VTX_COLOR_TYPE_DIFFUSE
+        basecolor_output.rgb *= v_VtxColor.rgb;
+    else if (${this.getShaderOptionNumber('vtxcolor_type') == 3}) // VTX_COLOR_TYPE_DIFFUSE_BLEND
+       basecolor_output.rgb *= (1.0 - v_VtxColor.rgb * v_VtxColor.rgb);
+
+    return basecolor_output;
+}
+
+vec4 BLEND0_OUTPUT;
+vec4 BLEND1_OUTPUT;
+vec4 BLEND2_OUTPUT;
+vec4 BLEND3_OUTPUT;
+vec4 BLEND4_OUTPUT;
+vec4 BLEND5_OUTPUT;
+
+vec2 GetScreenCoordinates()
+{
+	vec2 screenCoord = v_PerspDiv.xy * 0.5 + 0.5;
+    screenCoord.y = 1.0 - screenCoord.y;
+    return screenCoord;
+}
+
+vec2 GetResolvedTextureCoordinates()
+{
+    return v_PerspDiv.xy * 0.5 + 0.5;
+}
+
+vec4 CalculateOutput(int flag)
+{
+    if (flag == 10) return CalculateBaseColor(vec2(0.0));
+    else if (flag == 15) return v_VtxColor;
+    else if (flag == 20) {
+        // Normal map
+        return ${this.genSample("_n0", this.selectTexCoord(this.getShaderOptionNumber('normal_fuv_selector')))};
+    }
+    else if (flag == 30) return vec4(GetWorldNormal().xyz, 0.0); // World Normal
+
+    else if (flag == 50) return ${this.genUniform(0)};
+    else if (flag == 51) return ${this.genUniform(1)};
+    else if (flag == 52) return ${this.genUniform(2)};
+    else if (flag == 53) return ${this.genUniform(3)};
+    else if (flag == 54) return ${this.genUniform(4)};
+    else if (flag == 60) return CalculateSphereConstColor(${this.getShaderOptionNumber('sphere_const_color0')}, mat.const_color0, mat.sphere_rate_color0);
+    else if (flag == 61) return CalculateSphereConstColor(${this.getShaderOptionNumber('sphere_const_color1')}, mat.const_color1, mat.sphere_rate_color1);
+    else if (flag == 62) return CalculateSphereConstColor(${this.getShaderOptionNumber('sphere_const_color2')}, mat.const_color2, mat.sphere_rate_color2);
+    else if (flag == 63) return CalculateSphereConstColor(${this.getShaderOptionNumber('sphere_const_color3')}, mat.const_color3, mat.sphere_rate_color3);
+
+    else if (flag == 70) return texture(u_FrameBufferTexture, GetResolvedTextureCoordinates());
+    else if (flag == 78) return texture(u_TextureLinearDepth, GetResolvedTextureCoordinates());
+
+    else if (flag == 80) return BLEND0_OUTPUT;
+    else if (flag == 81) return BLEND1_OUTPUT;
+    else if (flag == 82) return BLEND2_OUTPUT;
+    else if (flag == 83) return BLEND3_OUTPUT;
+    else if (flag == 84) return BLEND4_OUTPUT;
+    else if (flag == 85) return BLEND5_OUTPUT;
+
+    else if (flag == 110) return vec4(mat.const_single0);
+    else if (flag == 111) return vec4(mat.const_single1);
+    else if (flag == 112) return vec4(mat.const_single2);
+    else if (flag == 113) return vec4(mat.const_single3);
+
+    else if (flag == 115) return vec4(0.0);
+    else if (flag == 116) return vec4(1.0);
+    else if (flag == 140) return vec4(modelInfo.uv_offset, 0.0, 0.0);
+    else if (flag == 160) return CalculateProcTexture2D(); // ProcTexture2D
+    else if (flag == 170) return CalculateProcTexture3D();
+
+    return vec4(0.0);
+}
+
+vec4 GetTransparentTexOutput(int flag, float bias_x, float bias_y)
+{
+    vec2 bias = vec2(bias_x, bias_y);
+
+    if (flag == 10)      return CalculateBaseColor(bias);
+    else if (flag == 50) return ${this.genUniform(0, 'bias')};
+    else if (flag == 51) return ${this.genUniform(1, 'bias')};
+    else if (flag == 52) return ${this.genUniform(2, 'bias')};
+    else if (flag == 53) return ${this.genUniform(3, 'bias')};
+    else if (flag == 54) return ${this.genUniform(4, 'bias')};
+    return vec4(0.0);
+}
+
+vec4 CalculateCofBlendOutput(int flag, int cof_map)
+{
+    if (flag == 10)      return v_VtxColor;
+    else if (flag == 20) return CalculateOutput(cof_map);
+
+    else if (flag == 30) return vec4(mat.const_single0);
+    else if (flag == 31) return vec4(mat.const_single1);
+    else if (flag == 32) return vec4(mat.const_single2);
+    else if (flag == 33) return vec4(mat.const_single3);
+
+    else if (flag == 60) return CalculateSphereConstColor(${this.getShaderOptionNumber('sphere_const_color0')}, mat.const_color0, mat.sphere_rate_color0);
+    else if (flag == 61) return CalculateSphereConstColor(${this.getShaderOptionNumber('sphere_const_color1')}, mat.const_color1, mat.sphere_rate_color1);
+    else if (flag == 62) return CalculateSphereConstColor(${this.getShaderOptionNumber('sphere_const_color2')}, mat.const_color2, mat.sphere_rate_color2);
+    else if (flag == 63) return CalculateSphereConstColor(${this.getShaderOptionNumber('sphere_const_color3')}, mat.const_color3, mat.sphere_rate_color3);
+
+    else if (flag == 115) return vec4(0.0);
+    else if (flag == 116) return vec4(1.0);
+
+    return vec4(0.0);
 }
 
 float BlendCompareComponent(float src, float dst, float cof)
@@ -468,6 +484,15 @@ vec4 CalculateBlend(bool enable, int src_id, int dst_id, int cof_id, int cof_map
     return src;
 }
 
+void TryCalculateReferencedBlend(int flag) {
+    if (flag == 80) BLEND0_OUTPUT = CalculateBlend(${this.getShaderOptionBoolean('enable_blend0')}, ${this.getShaderOptionNumber('blend0_src')}, ${this.getShaderOptionNumber('blend0_dst')}, ${this.getShaderOptionNumber('blend0_cof')}, ${this.getShaderOptionNumber('blend0_cof_map')}, ${this.getShaderOptionNumber('blend0_src_ch')}, ${this.getShaderOptionNumber('blend0_dst_ch')}, ${this.getShaderOptionNumber('blend0_cof_ch')}, ${this.getShaderOptionNumber('blend0_eq')});
+    else if (flag == 81) BLEND1_OUTPUT = CalculateBlend(${this.getShaderOptionBoolean('enable_blend1')}, ${this.getShaderOptionNumber('blend1_src')}, ${this.getShaderOptionNumber('blend1_dst')}, ${this.getShaderOptionNumber('blend1_cof')}, ${this.getShaderOptionNumber('blend1_cof_map')}, ${this.getShaderOptionNumber('blend1_src_ch')}, ${this.getShaderOptionNumber('blend1_dst_ch')}, ${this.getShaderOptionNumber('blend1_cof_ch')}, ${this.getShaderOptionNumber('blend1_eq')});
+    else if (flag == 82) BLEND2_OUTPUT = CalculateBlend(${this.getShaderOptionBoolean('enable_blend2')}, ${this.getShaderOptionNumber('blend2_src')}, ${this.getShaderOptionNumber('blend2_dst')}, ${this.getShaderOptionNumber('blend2_cof')}, ${this.getShaderOptionNumber('blend2_cof_map')}, ${this.getShaderOptionNumber('blend2_src_ch')}, ${this.getShaderOptionNumber('blend2_dst_ch')}, ${this.getShaderOptionNumber('blend2_cof_ch')}, ${this.getShaderOptionNumber('blend2_eq')});
+    else if (flag == 83) BLEND3_OUTPUT = CalculateBlend(${this.getShaderOptionBoolean('enable_blend3')}, ${this.getShaderOptionNumber('blend3_src')}, ${this.getShaderOptionNumber('blend3_dst')}, ${this.getShaderOptionNumber('blend3_cof')}, ${this.getShaderOptionNumber('blend3_cof_map')}, ${this.getShaderOptionNumber('blend3_src_ch')}, ${this.getShaderOptionNumber('blend3_dst_ch')}, ${this.getShaderOptionNumber('blend3_cof_ch')}, ${this.getShaderOptionNumber('blend3_eq')});
+    else if (flag == 84) BLEND4_OUTPUT = CalculateBlend(${this.getShaderOptionBoolean('enable_blend4')}, ${this.getShaderOptionNumber('blend4_src')}, ${this.getShaderOptionNumber('blend4_dst')}, ${this.getShaderOptionNumber('blend4_cof')}, ${this.getShaderOptionNumber('blend4_cof_map')}, ${this.getShaderOptionNumber('blend4_src_ch')}, ${this.getShaderOptionNumber('blend4_dst_ch')}, ${this.getShaderOptionNumber('blend4_cof_ch')}, ${this.getShaderOptionNumber('blend4_eq')});
+    else if (flag == 85) BLEND5_OUTPUT = CalculateBlend(${this.getShaderOptionBoolean('enable_blend5')}, ${this.getShaderOptionNumber('blend5_src')}, ${this.getShaderOptionNumber('blend5_dst')}, ${this.getShaderOptionNumber('blend5_cof')}, ${this.getShaderOptionNumber('blend5_cof_map')}, ${this.getShaderOptionNumber('blend5_src_ch')}, ${this.getShaderOptionNumber('blend5_dst_ch')}, ${this.getShaderOptionNumber('blend5_cof_ch')}, ${this.getShaderOptionNumber('blend5_eq')});
+}
+
 void PrecomputeBlends() {
     bool enable_blend =      ${this.getShaderOptionBoolean('enable_blend0')};
     int blend_src =          ${this.getShaderOptionNumber('blend0_src')};
@@ -478,6 +503,9 @@ void PrecomputeBlends() {
     int blend_dst_ch =       ${this.getShaderOptionNumber('blend0_dst_ch')};
     int blend_cof_ch =       ${this.getShaderOptionNumber('blend0_cof_ch')};
     int blend_eq =           ${this.getShaderOptionNumber('blend0_eq')};
+    TryCalculateReferencedBlend(blend_src);
+    TryCalculateReferencedBlend(blend_dst);
+    TryCalculateReferencedBlend(blend_cof_map);
     BLEND0_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
     
     enable_blend =       ${this.getShaderOptionBoolean('enable_blend1')};
@@ -489,6 +517,9 @@ void PrecomputeBlends() {
     blend_dst_ch =       ${this.getShaderOptionNumber('blend1_dst_ch')};
     blend_cof_ch =       ${this.getShaderOptionNumber('blend1_cof_ch')};
     blend_eq =           ${this.getShaderOptionNumber('blend1_eq')};
+    TryCalculateReferencedBlend(blend_src);
+    TryCalculateReferencedBlend(blend_dst);
+    TryCalculateReferencedBlend(blend_cof_map);
     BLEND1_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
     
     enable_blend =       ${this.getShaderOptionBoolean('enable_blend2')};
@@ -500,6 +531,9 @@ void PrecomputeBlends() {
     blend_dst_ch =       ${this.getShaderOptionNumber('blend2_dst_ch')};
     blend_cof_ch =       ${this.getShaderOptionNumber('blend2_cof_ch')};
     blend_eq =           ${this.getShaderOptionNumber('blend2_eq')};
+    TryCalculateReferencedBlend(blend_src);
+    TryCalculateReferencedBlend(blend_dst);
+    TryCalculateReferencedBlend(blend_cof_map);
     BLEND2_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
     
     enable_blend =       ${this.getShaderOptionBoolean('enable_blend3')};
@@ -511,6 +545,9 @@ void PrecomputeBlends() {
     blend_dst_ch =       ${this.getShaderOptionNumber('blend3_dst_ch')};
     blend_cof_ch =       ${this.getShaderOptionNumber('blend3_cof_ch')};
     blend_eq =           ${this.getShaderOptionNumber('blend3_eq')};
+    TryCalculateReferencedBlend(blend_src);
+    TryCalculateReferencedBlend(blend_dst);
+    TryCalculateReferencedBlend(blend_cof_map);
     BLEND3_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
     
     enable_blend =       ${this.getShaderOptionBoolean('enable_blend4')};
@@ -522,6 +559,9 @@ void PrecomputeBlends() {
     blend_dst_ch =       ${this.getShaderOptionNumber('blend4_dst_ch')};
     blend_cof_ch =       ${this.getShaderOptionNumber('blend4_cof_ch')};
     blend_eq =           ${this.getShaderOptionNumber('blend4_eq')};
+    TryCalculateReferencedBlend(blend_src);
+    TryCalculateReferencedBlend(blend_dst);
+    TryCalculateReferencedBlend(blend_cof_map);
     BLEND4_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
 
     enable_blend =       ${this.getShaderOptionBoolean('enable_blend5')};
@@ -533,15 +573,16 @@ void PrecomputeBlends() {
     blend_dst_ch =       ${this.getShaderOptionNumber('blend5_dst_ch')};
     blend_cof_ch =       ${this.getShaderOptionNumber('blend5_cof_ch')};
     blend_eq =           ${this.getShaderOptionNumber('blend5_eq')};
+    TryCalculateReferencedBlend(blend_src);
+    TryCalculateReferencedBlend(blend_dst);
+    TryCalculateReferencedBlend(blend_cof_map);
     BLEND5_OUTPUT = CalculateBlend(enable_blend, blend_src, blend_dst, blend_cof, blend_cof_map, blend_src_ch, blend_dst_ch, blend_cof_ch, blend_eq);
 }
 
 vec3 CalculateEmissionScale(vec3 emission, int scale_type, vec4 irradiance)
 {
     //Emission scale
-    if (scale_type == 0) // added, fixes moon kingdom background
-        return vec3(0.0);
-    else if (scale_type == 1) // emission * irradiance, max by emission
+    if (scale_type == 1) // emission * irradiance, max by emission
         emission = max(irradiance.rgb * emission.rgb, emission.rgb);
     else if (scale_type == 2) // emission * irradiance, max by 1.0
         emission = emission * max(irradiance.rgb, 1.0);
@@ -583,6 +624,23 @@ vec3 CalculateEmission(vec4 irradiance)
         emission = CalculateEmissionScale(emission, emission_scale_type, irradiance);
     }
     return emission;
+}
+
+vec3 CalculateClothEmission(vec4 irradiance)
+{
+    vec3 emission = ${this.genOutput('o_cloth_emission_map')}.rgb * mat.cloth_nov_emission_scale0;
+    return CalculateEmissionScale(emission, ${this.getShaderOptionNumber('cloth_nov_emission_scale_type')}, irradiance);
+}
+
+vec3 CalculateMetalFlakeEmission(float refract_bias_x, float refract_bias_y, vec4 irradiance)
+{
+    float transparent_tex = GetTransparentTexOutput(${this.getShaderOptionNumber('o_transparent_tex')}, refract_bias_x, refract_bias_y).r;
+    float metal_flake_power = GetComp(${this.genOutput('o_metal_flake_power')}, ${this.getShaderOptionNumber('metal_flake_power_component')}).x;
+    float v = metal_flake_power * log2(CalculateSphereLight());
+    vec3 emission_flake = vec3(transparent_tex * exp2(v));
+    emission_flake = CalculateEmissionScale(emission_flake, ${this.getShaderOptionNumber('metal_flake_emission_scale_type')}, irradiance);
+    vec3 refract_color = ${this.genOutput('o_refract_color')}.rgb;
+    return refract_color * emission_flake;
 }
 
 struct Light
@@ -637,21 +695,22 @@ vec4 CalculateDiffuseIrradianceLight(Light light)
     {
         if (${this.getShaderOptionBoolean('enable_material_light')} == true)
         {
-            vec4 irradiance_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, dir);
+            // Reference: DecodeCubemap(cTextureMaterialLightCube, dir, MAX_LOD).
+            // Our CPU binding maps cTextureMaterialLightCube into u_CubemapTexture0 for
+            // materials with enable_material_light, so use it directly instead of
+            // convolving again.
+            vec4 irradiance_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, dir, 5.0);
             irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
         }
         else //use material roughness cubemap
         {
-            // TODO: and TEMP: Roughness cubemap, which should be LOD 5.0
-            vec4 irradiance_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, dir, 1.0);
+            vec4 irradiance_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, dir, 5.0);
             irradiance.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
         }
-        // TODO: use cTextureMaterialLightSphere
         if (${this.getShaderOptionBoolean('enable_material_sphere_light')} == true)
         {
-	        vec2 sphereCoords = light.N.xy * vec2(0.5) + vec2(0.5, 0.5);
-            vec3 sphereCoords3 = vec3(sphereCoords, 0.0);
-            vec4 sphere_light = textureLod(u_CubemapTexture0, sphereCoords3, 1.0);
+            vec2 sphereCoords = light.N.xy * vec2(0.5) + vec2(0.5, 0.5);
+            vec4 sphere_light = textureLod(u_TextureMaterialLightSphere, sphereCoords, 1.0);
             irradiance.rgba += sphere_light.rgba * mdlEnvView.uIrradianceScale;
         }
     }
@@ -667,14 +726,6 @@ vec4 CalculateDiffuseIrradianceLight(Light light)
     return irradiance;
 }
 
-float RoughnessRemap(float roughness) {
-    float gloss = 1.0 - roughness;
-    gloss *= gloss;
-    gloss *= gloss;
-    return gloss;
-}
-
-/*
 vec3 CalculateBrdf(vec3 view_normal, vec3 dir, float roughness, vec3 f0)
 {
     float r = (1.0 - roughness);
@@ -690,44 +741,6 @@ vec3 CalculateBrdf(vec3 view_normal, vec3 dir, float roughness, vec3 f0)
         (fma(a2, fma(a2, 2.661, -3.603), nv * 1.404) + 1.699)) + 0.6045, 0.0, 1.0) - s;
 
     return f0.rgb * b + s * saturate(f0.g * 50.0);
-}
-*/
-
-// Implementation based on calcEnvDFGPolynomial from alEnvBrdfUtil.glsl
-vec3 CalculateBrdf(vec3 view_normal, vec3 dir, float roughness, vec3 F0)
-{
-    float gloss = RoughnessRemap(roughness);
-    float x = gloss;
-    float y = dot(view_normal, -dir); // N_V;
-
-    float b1 = -0.1688;
-    float b2 =  1.895;
-    float b3 =  0.9903;
-    float b4 = -4.853;
-    float b5 =  8.404;
-    float b6 = -5.069;
-
-    float d0 = 0.6045;
-    float d1 = 1.699;
-    float d2 = -0.5228;
-    float d3 = -3.603;
-    float d4 = 1.404;
-    float d5 = 0.1939;
-    float d6 = 2.661;
-
-    float bias  = clamp(min( x*(b1 + b2*x), b3 + y*(b4 + y*(b5 + b6*y))), 0.0, 1.0);
-    float delta = clamp(d0 + y*(d2 + d5*y) + x*(d1 + x*(d3 + d6*x) + d4*y), 0.0, 1.0);
-
-    float scale = delta - bias;
-    bias *= clamp(50.0*F0.g, 0.0, 1.0);
-    return F0 * scale + bias;
-}
-
-vec2 GetScreenCoordinates()
-{
-	vec2 screenCoord = v_PerspDiv.xy * 0.5 + 0.5;
-    screenCoord.y = 1.0 - screenCoord.y;
-    return screenCoord;
 }
 
 void CalculateIndirectCoordinates()
@@ -750,25 +763,20 @@ void CalculateIndirectCoordinates()
 }
 
 void main() {
-    vec4 debug_fbo = texture(u_TextureLinearDepth, GetScreenCoordinates());
-    if (any(greaterThan(debug_fbo.rgb, vec3(0.0)))) {
-        gl_FragColor = debug_fbo;
-        return;
-    }
-
-    PrecomputeBlends();
     CalculateIndirectCoordinates();
+    PrecomputeBlends();
 
-    vec4 base_color           = ${this.genOutput('o_base_color')};
+    vec4 base_color_raw       = ${this.genOutput('o_base_color')};
+    vec4 base_color           = base_color_raw;
     vec2 normal_map           = ${this.genOutput('o_normal')}.rg;
     float metalness   = GetComp(${this.genOutput('o_metalness')}, ${this.getShaderOptionNumber('metalness_component')}).r;
     float roughness   = GetComp(${this.genOutput('o_roughness')}, ${this.getShaderOptionNumber('roughness_component')}).r;
     vec4 sss                  = ${this.genOutput('o_sss')};
     vec4 ao                   = ${this.genOutput('o_ao')};
-    float alpha      = GetComp(${this.genOutput('o_alpha')}, ${this.getShaderOptionNumber('alpha_component')}).r;
-    bool has_transparent_tex = ${this.getShaderOptionBoolean('enable_transparent')};
+    float alpha      = GetComp(${this.genOutput('o_alpha')}, ${this.getShaderOptionNumber('alpha_component')}).w;
+    bool has_transparent_tex = ${this.getShaderOptionBoolean('enable_transparent')} && ${this.getShaderOptionNumber('transparent_type')} == 30;
 
-    vec3 eye_to_pos = v_ViewPos.xyz;
+    vec3 eye_to_pos = vec3(v_ViewPos.zw, v_LightColorVPosZ.w);
     vec3 dir = normalize(eye_to_pos);
 
     vec3 specularTerm = vec3(0.0);
@@ -807,7 +815,13 @@ void main() {
                       fma(view_normal.x,  -dir.x, 
                           view_normal.y * -dir.y)), 0.0, 1.0);
 
-    // TODO: Dirt stain
+    // Dirt stain
+    if (${this.getShaderOptionBoolean('enable_add_stain_proc_texture_3d')} == true)
+    {
+        vec3 stain_texcoord = v_LocalPos.xyz * mat.stain_uv_scale;
+        float stain_intensity = texture(u_TextureProcTexture3D, stain_texcoord).x * mat.stain_rate;
+        base_color.rgb = clamp(mix(base_color.rgb, mat.stain_color.rgb, stain_intensity), 0.0, 1.0);
+    }
 
     // refract
     float refract_eta = GetComp(${this.genOutput('o_refract_eta')}, ${this.getShaderOptionNumber('refract_eta_component')}).r;
@@ -876,49 +890,50 @@ void main() {
     base_color.rgb *= vec3(1) - refract_rate;
 
     // Fresnel
-    vec3 f0 = mix(vec3(0.04), base_color.rgb, metalness); // dialectric
+    vec3 f0 = mix(vec3(0.04), base_color.rgb, metalness); // dielectric
+    vec3 albedo_color = base_color.rgb * saturate(1.0 - metalness);
     vec3 brdf = CalculateBrdf(view_normal, dir, roughness, f0);
 
     // Specular GGX
     if (${this.getShaderOptionBoolean('is_use_forward_ggx_specular')} == true)
     {
-        vec3 spec_intensity = calcSpecularGGX(roughness, f0, light.N, light.V, light.L, light.H);
+        vec3 spec_intensity = calcSpecularGGX(roughness, metalness, f0, light.N, light.V, light.L, light.H);
         specularTerm += spec_intensity;
     }
 
     float spec = metalness * 0.5 + 0.5;
-    //use material light cubemap
     if (${this.getShaderOptionBoolean('enable_material_light')} == true)
     {
-        vec4 spec_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, light.R);
+        vec4 spec_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, light.R, roughness * 5.0);
         specularTerm.rgb += spec * (spec_cubemap.rgb * mdlEnvView.uIrradianceScale) * brdf;
     }
     else
     {
-        // TODO: and TEMP: Roughness cubemap
         vec4 spec_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, light.R, roughness * 5.0);
         specularTerm.rgb += spec * (spec_cubemap.rgb * mdlEnvView.uIrradianceScale) * brdf;
     }
 
     // TODO: enable_structural_color
 
-    // TODO: enable_material_sphere_light
+    if (${this.getShaderOptionBoolean('enable_material_sphere_light')} == true)
+    {
+        vec2 sphereCoords = light.N.xy * vec2(0.5) + vec2(0.5, 0.5);
+        vec4 sphere_light = textureLod(u_TextureMaterialLightSphere, sphereCoords, roughness);
+        specularTerm.rgb += spec * (sphere_light.rgb * mdlEnvView.uIrradianceScale) * brdf;
+    }
 
-    // Diffuse
     vec3 diffuseTerm = saturate(base_color.rgb);
 
     // Irradiance lighting
     vec4 irradiance = CalculateDiffuseIrradianceLight(light);
 
-    // Adjust for metalness
     diffuseTerm *= saturate(1.0 - metalness);
     diffuseTerm *= vec3(1) - brdf;
 
     diffuseTerm *= irradiance.rgb;
 
-    // Directional light
-    float directionalLight = saturate(dot(N, mdlEnvView.cDirLightViewDirFetchPos.xyz)) * INV_PI;
-    diffuseTerm += base_color.rgb * saturate(1.0 - metalness) * directionalLight * light_color;
+    float directionalLight = saturate(dot(view_normal, mdlEnvView.cDirLightViewDirFetchPos.xyz)) * (1.0 / PI);
+    diffuseTerm += albedo_color * directionalLight * light_color;
 
     // Base color refract type
     if (${this.getShaderOptionBoolean('enable_transparent')} == true) {
@@ -927,17 +942,14 @@ void main() {
 
         int transparent_tex_type = ${this.getShaderOptionNumber('transparent_tex_type')};
         
-        // TODO: This is broken!
         // TRANS_TEX_TYPE_DIFFUSE || TRANS_TEX_TYPE_DIFFUSE_IRRADIANCE
-        /*
-        if (has_transparent_tex && (transparent_tex_type == 15 || transparent_tex_type == 20)) {
+        if ((has_transparent_tex && transparent_tex_type == 15) || transparent_tex_type == 20) {
             vec3 transparent_tex = GetTransparentTexOutput(${this.getShaderOptionNumber('o_transparent_tex')}, refract_bias_x, refract_bias_y).rgb;
             vec3 refract_value = transparent_tex * refract_color * refract_amount;
             if (transparent_tex_type == 20) // TRANS_TEX_TYPE_DIFFUSE_IRRADIANCE
                 refract_value *= irradiance.rgb;
             diffuseTerm.rgb += refract_value;
         }
-        */
         
         int transparent_type = ${this.getShaderOptionNumber('transparent_type')};
         
@@ -945,19 +957,20 @@ void main() {
         if (transparent_type == 20 || transparent_type == 25) {
             vec2 ind_coords = refract_eta * -N_I * view_normal.xy;
             
-            vec2 view_diff = GetScreenCoordinates() + ind_coords;
+            vec2 view_diff = GetResolvedTextureCoordinates() + ind_coords;
             
             if (${this.getShaderOptionBoolean('enable_indirect_dist_correct')} == true) {
                 // calcIndirectDistCorrect
-                float diff_depth = -abs(v_Depth - texture(u_TextureLinearDepth, view_diff).x);
+                // TODO: ice UV issue at close distances
+                float base_depth = texture(u_TextureLinearDepth, GetResolvedTextureCoordinates()).x;
+                float diff_depth = -abs(v_Depth - base_depth);
                 diff_depth = clamp01(1.0 - exp2(diff_depth * mat.indirect_depth_scale));
-                view_diff *= diff_depth;
-                view_diff = GetScreenCoordinates() + ind_coords * diff_depth;
+                view_diff = GetResolvedTextureCoordinates() + ind_coords * diff_depth;
             }
         
             if (transparent_type == 25) { // TRANS_TYPE_IND_FBO_DEPTH
                 if (texture(u_TextureLinearDepth, view_diff).x < v_Depth) 
-                    view_diff = GetScreenCoordinates();
+                    view_diff = GetResolvedTextureCoordinates();
             }
         
             vec4 fbo = texture(u_FrameBufferTexture, view_diff);
@@ -997,24 +1010,31 @@ void main() {
     }
 
     vec4 light_buf = vec4(0.0);
+    vec3 additiveTerm = vec3(0.0);
 
     // Light output diffuse + specular
     light_buf.rgb = diffuseTerm + specularTerm;
-    light_buf.a = alpha;
+    light_buf.a = alpha * modelInfo.model_alpha_mask;
 
-    // TODO: Cloth Emission
+    // Cloth Emission
+    if (${this.getShaderOptionBoolean('enable_cloth_nov')} == true)
+        additiveTerm += CalculateClothEmission(irradiance) * cloth_value;
 
     // Emission
     if (${this.getShaderOptionBoolean('enable_emission')} == true)
-        light_buf.rgb += CalculateEmission(irradiance).rgb;
+        additiveTerm += CalculateEmission(irradiance).rgb;
 
-    // TODO: metal flake emission
+    // Metal flake emission
+    if (has_transparent_tex && ${this.getShaderOptionNumber('transparent_tex_type')} == 25)
+        additiveTerm += CalculateMetalFlakeEmission(refract_bias_x, refract_bias_y, irradiance);
 
     if (${this.getShaderOptionBoolean('enable_sss')} == true)
     {
         float light_intensity = CalculateDirectionalLightWrap(view_normal);
-        light_buf.rgb += light_color.xyz * diffuseTerm.rgb * light_intensity * sss.r * (1.0 / PI);
+        additiveTerm += light_color.xyz * diffuseTerm.rgb * light_intensity * sss.r * (1.0 / PI);
     }
+    
+    light_buf.rgb += additiveTerm;
 
     // TODO: if enable_translucent, adjust for shadows
 
@@ -1024,9 +1044,17 @@ void main() {
 
     light_buf.rgb = CalculateFog(light_buf.rgb, eye_to_pos, v_WorldPos);
 
+#ifdef OPT_RIPPLE_MATERIAL
+    // InitRippleParam replacement materials are drawn with RGB replace / alpha preserve
+    // Empty ripple texels must not replace the opaque scene with black
+    if (max(max(light_buf.r, light_buf.g), light_buf.b) < 0.001)
+        discard;
+#endif
+#ifdef OPT_ADDITIVE_XLU
+    gl_FragColor = vec4(light_buf.rgb, 0.0);
+#else
     gl_FragColor = vec4(light_buf.rgb, light_buf.a);
-
-    gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(mdlEnvView.HDRTranslate_uHDRPower / mdlEnvView.HDRTranslate_uDynamicRange));
+#endif
 }
 `;
 
@@ -1042,6 +1070,7 @@ layout(location = 7) in vec2 _u3;
 
 out vec3 v_Normal;
 out vec3 v_WorldPos;
+out vec3 v_LocalPos;
 out float v_Depth;
 out vec4 v_Tangents;
 out vec4 v_Bitangents;
@@ -1057,6 +1086,40 @@ out vec2 v_SphereCoords;
 out vec4 v_PerspDiv;
 out vec4 v_IndirectCoords;
 
+vec2 calc_texcoord_matrix(mat2x4 mtx, vec2 tex_coord) {
+    vec3 r0 = vec3(mtx[0].xyz);
+    vec3 r1 = vec3(mtx[0].w, mtx[1].xy);
+    vec3 uv1 = vec3(tex_coord, 1.0);
+    return vec2(dot(uv1, r0), dot(uv1, r1));
+}
+
+vec2 get_tex_mtx(vec2 tex_coord, int type) {
+    if (type == 1)
+        return calc_texcoord_matrix(mat.tex_mtx0, tex_coord);
+    else if (type == 2)
+        return calc_texcoord_matrix(mat.tex_mtx1, tex_coord);
+    else if (type == 3)
+        return calc_texcoord_matrix(mat.tex_mtx2, tex_coord);
+    else if (type == 4)
+        return calc_texcoord_matrix(mat.tex_mtx3, tex_coord);
+    else
+        return tex_coord;
+}
+
+vec2 get_tex_coord(int selector, int mtx_type, bool enable) {
+    if (!enable)
+        return _u0;
+
+    if (selector == 1)
+        return get_tex_mtx(_u1, mtx_type);
+    else if (selector == 2)
+        return get_tex_mtx(_u2, mtx_type);
+    else if (selector == 3)
+        return get_tex_mtx(_u3, mtx_type);
+    else
+        return get_tex_mtx(_u0, mtx_type);
+}
+
 void main() {
     // World space position
     vec3 worldPos = UnpackMatrix(u_Model) * vec4(_p0, 1.0);
@@ -1065,45 +1128,40 @@ void main() {
     vec3 viewPos = UnpackMatrix(u_View) * vec4(worldPos, 1.0);
     gl_Position = UnpackMatrix(u_Projection) * vec4(viewPos, 1.0);
 
-    v_ViewPos = vec4(viewPos, 1.0);
+    v_ViewPos = vec4(0.0, 0.0, viewPos.xy);
     v_WorldPos = worldPos;
+    v_LocalPos = _p0;
+    v_Depth = (gl_Position.w - mdlEnvView.cNear) * mdlEnvView.cInvRange;
 
     // World space normal
     v_Normal = normalize((UnpackMatrix(u_Model) * vec4(_n0.xyz, 0.0)).xyz);
 
-    v_TexCoord0 = _u0;
-    v_TexCoord1 = _u1;
-    v_TexCoord2 = _u2;
-    v_TexCoord3 = _u3;
+    v_TexCoord0 = get_tex_coord(${this.getShaderOptionNumber('fuv0_selector')}, ${this.getShaderOptionNumber('fuv0_mtx')}, ${this.getShaderOptionBoolean('enable_fuv0')});
+    v_TexCoord1 = get_tex_coord(${this.getShaderOptionNumber('fuv1_selector')}, ${this.getShaderOptionNumber('fuv1_mtx')}, ${this.getShaderOptionBoolean('enable_fuv1')});
+    v_TexCoord2 = get_tex_coord(${this.getShaderOptionNumber('fuv2_selector')}, ${this.getShaderOptionNumber('fuv2_mtx')}, ${this.getShaderOptionBoolean('enable_fuv2')});
+    v_TexCoord3 = get_tex_coord(${this.getShaderOptionNumber('fuv3_selector')}, ${this.getShaderOptionNumber('fuv3_mtx')}, ${this.getShaderOptionBoolean('enable_fuv3')});
     v_VtxColor = _c0;
 
     v_LightColorVPosZ.w = viewPos.z;
 
     vec3 light_color = textureLod(u_DirectionalLightLUT, vec2(mdlEnvView.cDirLightViewDirFetchPos.w, 0.5), 0.0).xyz;
-    
-    // temp
-    light_color *= 5.0;
-
     v_LightColorVPosZ.xyz = light_color;
    
     if (${this.getShaderOptionBoolean('is_apply_irradiance_pixel')} == false)
     {
         if (${this.getShaderOptionBoolean('enable_material_light')}) // use material light cubemap
         {
-            vec4 irradiance_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, v_Normal);
+            vec4 irradiance_cubemap = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, vec3(v_Normal.x, v_Normal.y, -v_Normal.z));
             v_IrradianceVertex = irradiance_cubemap *= mdlEnvView.uIrradianceScale;
         }
         else //use material roughness cubemap
         {
-            // TODO: and TEMP: Roughness cubemap, which should be LOD 5.0
-            vec4 irradiance_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, v_Normal, 5.0);
+            vec4 irradiance_cubemap = fetchCubeMapConvertHdr(u_CubemapTexture0, vec3(v_Normal.x, v_Normal.y, -v_Normal.z), 5.0);
             v_IrradianceVertex.rgba = irradiance_cubemap.rgba * mdlEnvView.uIrradianceScale;
         }
     }
 
     // TODO: enable_motion_vec
-
-    // TODO: Check if any proj textures are used
 
     // Sphere mapping coordinates
     vec3 view_normal = normalize(multMtx34Vec3(mdlEnvView.cView, v_Normal));
@@ -1111,10 +1169,11 @@ void main() {
 
     v_PerspDiv.xy = gl_Position.xy / gl_Position.w;
 
-    v_Tangents = _t0;
+    vec3 T = normalize((UnpackMatrix(u_Model) * vec4(_t0.xyz, 0.0)).xyz);
+    v_Tangents = vec4(T, 0.0);
     
     // bitangent
-    vec3 B = normalize(cross(v_Normal, _t0.xyz) * _t0.w);
+    vec3 B = normalize(cross(v_Normal, T) * _t0.w);
     v_Tangents.w = B.x;
     v_Bitangents.x = B.y;
     v_Bitangents.y = B.z;

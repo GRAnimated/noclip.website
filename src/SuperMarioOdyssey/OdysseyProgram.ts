@@ -42,6 +42,10 @@ layout(std140) uniform ub_MdlEnvView {
     vec3 cCameraPos;
     float _padding3;
 
+    // TODO: Nintendo's MdlEnvView has extra fields here
+    float cGlobalLodBias;
+    vec3 _paddingAaaa;
+
     // Fog here since we're short on uniform blocks
     vec4 cFogColor;         // .rgb = color, .a = slope
     float cFogStart;
@@ -110,7 +114,6 @@ layout(std140) uniform ub_Material {
     float cloth_nov_emission_scale0;
     vec3 cloth_nov_noise_mask_scale0;
     vec4 proc_texture_3d_scale;
-    // vec4 flow0_param;
     vec4 ripple_emission_color;
     vec4 hack_color;
     vec4 stain_color;
@@ -149,10 +152,13 @@ uniform sampler2D u_DirectionalLightLUT;
 uniform sampler2D u_ExposureTexture;
 uniform sampler2D u_TextureLinearDepth;
 uniform sampler2D u_FrameBufferTexture;
+uniform sampler2D u_TextureMaterialLightSphere;
+uniform sampler2D u_TextureProcTexture2D;
+uniform mediump sampler3D u_TextureProcTexture3D;
 `;
 
 export const bindingLayouts: GfxBindingLayoutDescriptor[] = [
-    { numUniformBuffers: 4, numSamplers: 13, samplerEntries: [
+    { numUniformBuffers: 4, numSamplers: 16, samplerEntries: [
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
@@ -166,6 +172,9 @@ export const bindingLayouts: GfxBindingLayoutDescriptor[] = [
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.UnfilterableFloat, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.UnfilterableFloat, },
         { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n2D, formatKind: GfxSamplerFormatKind.Float, },
+        { dimension: GfxTextureDimension.n3D, formatKind: GfxSamplerFormatKind.Float, },
     ] }
 ];
 
@@ -183,6 +192,9 @@ export class OdysseyProgram extends DeviceProgram {
     public static _e0: number = 10; // exposure
     public static _ld0: number = 11; // linear depth
     public static _fb0: number = 12; // framebuffer texture
+    public static _mls0: number = 13; // cTextureMaterialLightSphere
+    public static _pt2d0: number = 14; // cTextureProcTexture2D
+    public static _pt3d0: number = 15; // cTextureProcTexture3D
     public static a_Orders = [ '_p0', '_c0', '_u0', '_n0', '_t0', '_u1', '_u2', '_u3', '_m0', '_lut0', '_e0', '_ld0', '_fb0' ];
 
     public static ub_ShapeParams = 0;
@@ -199,21 +211,49 @@ export class OdysseyProgram extends DeviceProgram {
 
     public override both = generateShaderUtil();
 
+    private static materialSamplerSlots = [ '_a0', '_n0', '_u0', '_u1', '_u2', '_u3', '_u4' ];
+
     public lookupSamplerIndex(shadingModelSamplerBindingName: string) {
-        // Translate to a local sampler by looking in the sampler map, and then that's the index we use.
+        // Translate to the material's raw sampler index by looking in the sampler map.
         const samplerName = assertExists(this.fmat.shaderAssign.samplerAssign.get(shadingModelSamplerBindingName));
         const samplerIndex = this.fmat.samplerInfo.findIndex((sampler) => sampler.name === samplerName);
         assert(samplerIndex >= 0);
         return samplerIndex;
     }
 
+    public lookupMaterialTextureUnit(shadingModelSamplerBindingName: string): number {
+        // Switch binds a lot of named samplers but we're constricted.
+        // Pack the shader samplers we use into u_Texture0..7 slots instead of assuming
+        // their raw FMAT sampler index is already < 8.
+        const textureUnit = OdysseyProgram.materialSamplerSlots.indexOf(shadingModelSamplerBindingName);
+        assert(textureUnit >= 0 && textureUnit < 8);
+        this.lookupSamplerIndex(shadingModelSamplerBindingName);
+        return textureUnit;
+    }
+
+    public getMaterialSamplerSlotAssignments(): { textureUnit: number, samplerIndex: number }[] {
+        const assignments: { textureUnit: number, samplerIndex: number }[] = [];
+        for (let textureUnit = 0; textureUnit < OdysseyProgram.materialSamplerSlots.length; textureUnit++) {
+            const shaderSamplerName = OdysseyProgram.materialSamplerSlots[textureUnit];
+            try {
+                assignments.push({ textureUnit, samplerIndex: this.lookupSamplerIndex(shaderSamplerName) });
+            } catch (e) {
+            }
+        }
+        return assignments;
+    }
+
     public getShaderOptionNumber(optionName: string): number {
-        const optionValue = assertExists(this.fmat.shaderAssign.shaderOption.get(optionName), `Shader option ${optionName} not found in material ${this.fmat.name}`);
+        const optionValue = this.fmat.shaderAssign.shaderOption.get(optionName);
+        if (optionValue === undefined)
+            return 0;
         return +optionValue;
     }
 
     public getShaderOptionBoolean(optionName: string): boolean {
-        const optionValue = assertExists(this.fmat.shaderAssign.shaderOption.get(optionName), `Shader option ${optionName} not found in material ${this.fmat.name}`);
+        const optionValue = this.fmat.shaderAssign.shaderOption.get(optionName);
+        if (optionValue === undefined)
+            return false;
         assert(optionValue === '0' || optionValue === '1');
         return optionValue === '1';
     }
@@ -237,15 +277,23 @@ export class OdysseyProgram extends DeviceProgram {
             return 'indirectCoords.zw';
         else if  (mtx_select == 30) //sphere mapping
             return 'v_SphereCoords.xy';
-        else //TODO 50 - 54 are proj texture types
+        else if (mtx_select == 50) //proj texture 0
+            return '(vec4(v_LocalPos.xyz, 1.0) * modelInfo.proj_mtx0).xy';
+        else if (mtx_select == 51) //proj texture 1
+            return '(vec4(v_LocalPos.xyz, 1.0) * modelInfo.proj_mtx1).xy';
+        else if (mtx_select == 52) //proj texture 2
+            return '(vec4(v_LocalPos.xyz, 1.0) * modelInfo.proj_mtx2).xy';
+        else if (mtx_select == 53) //proj texture 3
+            return '(vec4(v_LocalPos.xyz, 1.0) * modelInfo.proj_mtx3).xy';
+        else
             return 'v_TexCoord0.xy';
     }
 
     public genSample(shadingModelSamplerBindingName: string, texCoord: string, additional: string = ''): string {
         try {
-            const samplerIndex = this.lookupSamplerIndex(shadingModelSamplerBindingName);
+            const textureUnit = this.lookupMaterialTextureUnit(shadingModelSamplerBindingName);
             const uv = texCoord;
-            return `texture(u_Texture${samplerIndex}, vec2(${uv}.x, ${uv}.y)${additional})`;
+            return `texture(u_Texture${textureUnit}, vec2(${uv}.x, ${uv}.y)${additional})`;
         } catch(e) {
             // TODO(jstpierre): Figure out wtf is going on.
             // console.warn(`${this.name}: No sampler by name ${shadingModelSamplerBindingName}`);
@@ -267,11 +315,10 @@ export class OdysseyProgram extends DeviceProgram {
         
         let textureUnit: number;
         try {
-            textureUnit = this.lookupSamplerIndex(shaderSamplerName);
+            textureUnit = this.lookupMaterialTextureUnit(shaderSamplerName);
         } catch(e) {
             return `vec4(1.0)`; // no texture bound
         }
-        
         return `
             CalculateUniform(u_Texture${textureUnit},
             ${this.getShaderOptionNumber(`uniform${num}_fuv_selector`)},

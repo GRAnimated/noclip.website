@@ -1,15 +1,14 @@
-import { OdysseyProgram } from '../OdysseyProgram.js';
-
 export function generateFogCode(): string {
     return `
 vec3 CalculateFog(vec3 color, vec3 view_pos, vec3 world_pos) {
     float fog_intensity = 0.0;
     float y_fog_intensity = 0.0;
-    
-    float fog_dist_intensity = mdlEnvView.cFogColor.a * (-view_pos.z - mdlEnvView.cFogStart);
+
+    float fog_dist_intensity = mdlEnvView.cFogColor.a * (-view_pos.z + mdlEnvView.cFogStart);
     fog_intensity = clamp(clamp(1.0 - exp2(-fog_dist_intensity), 0.0, 1.0) * mdlEnvView.cFogMax, 0.0, 1.0);
 
-    float y_fog_dist_intensity = mdlEnvView.cYFogColor.a * (mdlEnvView.cYFogStart - world_pos.y);
+    float y_fog_start = mdlEnvView.cYFogStart - 1.0;
+    float y_fog_dist_intensity = mdlEnvView.cYFogColor.a * (-world_pos.y + y_fog_start);
     y_fog_intensity = clamp(clamp(1.0 - exp2(-y_fog_dist_intensity), 0.0, 1.0) * mdlEnvView.cYFogMax, 0.0, 1.0);
 
     if (fog_intensity + y_fog_intensity < 0.00001)

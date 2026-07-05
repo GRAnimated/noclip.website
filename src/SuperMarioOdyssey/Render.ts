@@ -1,16 +1,17 @@
 
 import * as UI from '../ui.js';
 import * as Viewer from '../viewer.js';
+
 import { TextureHolder, TextureMapping } from '../TextureHolder.js';
 
 import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode, GfxCullMode, GfxCompareMode, GfxInputLayout, GfxBuffer, GfxBufferUsage, GfxFormat, GfxVertexAttributeDescriptor, GfxVertexBufferFrequency, GfxVertexBufferDescriptor, GfxBindingLayoutDescriptor, GfxBlendMode, GfxBlendFactor, GfxProgram, GfxMegaStateDescriptor, GfxIndexBufferDescriptor, GfxInputLayoutBufferDescriptor, makeTextureDescriptor2D, GfxBufferFrequencyHint, GfxChannelWriteMask, GfxTextureDimension, GfxTextureUsage, GfxSamplerFormatKind, GfxTexture } from '../gfx/platform/GfxPlatform.js';
 
 import * as BNTX from '../fres_nx/bntx.js';
 import { surfaceToCanvas } from '../Common/bc_texture.js';
-import { translateImageFormat, deswizzle, decompress, getImageFormatString } from '../fres_nx/tegra_texture.js';
-import { FMDL, FSHP, FMAT, FMAT_RenderInfo, FMAT_RenderInfoType, FVTX, FSHP_Mesh, FRES, FVTX_VertexAttribute, FVTX_VertexBuffer, Texsrt, parseFMAT_ShaderParam_Float, parseFMAT_ShaderParam_Float2, parseFMAT_ShaderParam_Float3, parseFMAT_ShaderParam_Float4, parseFMAT_ShaderParam_Color3, parseFMAT_ShaderParam_Texsrt } from '../fres_nx/bfres.js';
-import { GfxRenderInst, makeSortKey, GfxRendererLayer, setSortKeyDepth, GfxRenderInstManager, GfxRenderInstList } from '../gfx/render/GfxRenderInstManager.js';
-import { TextureAddressMode, FilterMode, IndexFormat, AttributeFormat, getChannelFormat, getTypeFormat } from '../fres_nx/nngfx_enum.js';
+import { translateImageFormat, deswizzle, decompress, getImageFormatString, getFormatBlockWidth, getFormatBlockHeight, getFormatBytesPerPixel } from '../fres_nx/tegra_texture.js';
+import { FMDL, FSHP, FMAT, FMAT_RenderInfo, FMAT_RenderInfoType, FVTX, FSHP_Mesh, FRES, FVTX_VertexAttribute, FVTX_VertexBuffer, Texsrt, FMAT_ShaderParam, parseFMAT_ShaderParam_Float, parseFMAT_ShaderParam_Float2, parseFMAT_ShaderParam_Float3, parseFMAT_ShaderParam_Float4, parseFMAT_ShaderParam_Color3, parseFMAT_ShaderParam_Texsrt } from '../fres_nx/bfres.js';
+import { GfxRenderInst, makeSortKey, GfxRendererLayer, setSortKeyDepth, setSortKeyBias, getSortKeyLayer, GfxRenderInstManager, GfxRenderInstList } from '../gfx/render/GfxRenderInstManager.js';
+import { TextureAddressMode, FilterMode, IndexFormat, AttributeFormat, getChannelFormat, getTypeFormat, ChannelFormat } from '../fres_nx/nngfx_enum.js';
 import { nArray, assert, assertExists } from '../util.js';
 import { fillMatrix4x4, fillMatrix4x3 } from '../gfx/helpers/UniformBufferHelpers.js';
 import { mat3, mat4, vec2, vec3, vec4 } from "gl-matrix";
@@ -29,13 +30,24 @@ import { createBufferFromData, createBufferFromSlice } from '../gfx/helpers/Buff
 import { generateShaderUtil } from './Shaders/ShaderUtil.js';
 import { OdysseySceneDesc, GraphicsPreset, OdysseyRenderer } from './Scenes.js';
 import { convertToCanvasData } from '../gfx/helpers/TextureConversionHelpers.js';
-import { MathConstants } from '../MathHelpers.js';
+import { MathConstants, clamp } from '../MathHelpers.js';
 import { bindingLayouts, OdysseyProgram } from './OdysseyProgram.js';
 import { RenderMaterial } from './Shaders/RenderMaterial.js';
 import { RenderSky } from './Shaders/RenderSky.js';
 import { fillHdrComposeUniforms, HdrCompose } from './Shaders/HdrCompose.js';
 import { RenderCloudLayer } from './Shaders/RenderCloudLayer.js';
 import { LinearDepth } from './Shaders/LinearDepth.js';
+import { composeLightMapCube, generateLightMapCube, generateLightMapSphere, GeneratedLightMapCube, GeneratedLightMapSphere } from './LightMap.js';
+import { InitRippleParam, findRippleMatParams } from './Ripple.js';
+
+const kLateBindingFramebuffer = 'smo-opaque-framebuffer';
+const kLateBindingLinearDepth = 'smo-linear-depth';
+
+function getBRTIMipLayerBuffer(mipBuffer: ArrayBufferSlice | ArrayBufferSlice[], layer = 0): ArrayBufferSlice {
+    // BNTX array/cubemap textures store each mip as one buffer per array layer.
+    // Plain 2D upload paths only want the first layer; cubemap paths request each face explicitly.
+    return Array.isArray(mipBuffer) ? assertExists(mipBuffer[layer]) : mipBuffer;
+}
 
 export interface TextureScopeKey {
     archiveName?: string;
@@ -47,6 +59,24 @@ function makeScopeId(scope: TextureScopeKey): string {
 
 function makeDefaultGroupLabel(scope: TextureScopeKey): string {
     return scope.archiveName ?? 'Global';
+}
+
+function nextPow2(v: number): number {
+    return v <= 1 ? 1 : 1 << Math.ceil(Math.log2(v));
+}
+
+function getBlockLinearMipLayerSize(width: number, height: number, channelFormat: ChannelFormat, blockHeightLog2: number): number {
+    const blockWidth = getFormatBlockWidth(channelFormat);
+    const blockHeightFormat = getFormatBlockHeight(channelFormat);
+    const widthInBlocks = Math.ceil(width / blockWidth);
+    const heightInBlocks = Math.ceil(height / blockHeightFormat);
+    let blockHeight = 1 << blockHeightLog2;
+    while (blockHeight > 1 && nextPow2(heightInBlocks) < 8 * blockHeight)
+        blockHeight >>= 1;
+    const bpp = getFormatBytesPerPixel(channelFormat);
+    const widthInGobs = Math.ceil((widthInBlocks * bpp) / 64);
+    const heightInGobBlocks = Math.ceil(heightInBlocks / (8 * blockHeight));
+    return widthInGobs * 512 * blockHeight * heightInGobBlocks;
 }
 
 interface TextureEntry {
@@ -63,6 +93,7 @@ class GroupedTextureHolder implements UI.TextureListHolder {
     public onnewtextures: (() => void) | null = null;
     public pendingUploads: Promise<void>[] = [];
     private entries: TextureEntry[] = [];
+    protected cubeCpuLevels = new Map<string, { size: number, levels: Float32Array[] }>();
 
     // scopeId to flat index
     private scopeIdToIndices = new Map<string, number[]>();
@@ -113,6 +144,14 @@ class GroupedTextureHolder implements UI.TextureListHolder {
             this.scopeIdToLabel.set(scopeId, label);
         }
         return scopeId;
+    }
+
+    public hasTexture(name: string): boolean {
+        return this.textureNames.indexOf(name) >= 0;
+    }
+
+    public getCubeTextureCpuLevels(name: string): { size: number, levels: Float32Array[] } | null {
+        return this.cubeCpuLevels.get(name) ?? null;
     }
 
     public addTexture(gfxTexture: GfxTexture, viewerTexture: Viewer.Texture, scope: TextureScopeKey, groupLabel?: string): void {
@@ -190,7 +229,6 @@ export class BRTITextureHolder extends GroupedTextureHolder {
         const bntxFile = fres.externalFiles.find((f) => f.name === 'textures.bntx');
         if (bntxFile !== undefined) {
             const scope: TextureScopeKey = { archiveName: archiveName };
-            // console.log(`Adding FRES textures for archive: ${archiveName} with scope ${JSON.stringify(scope)}`);
             this.addBNTXFile(device, bntxFile.buffer, scope);
         }
     }
@@ -229,7 +267,7 @@ export class BRTITextureHolder extends GroupedTextureHolder {
         for (let i = 0; i < numLevels; i++) {
             const mipLevel = i;
 
-            const buffer = textureEntry.mipBuffers[i] as ArrayBufferSlice;
+            const buffer = getBRTIMipLayerBuffer(textureEntry.mipBuffers[i]);
             const width = Math.max(textureEntry.width >>> mipLevel, 1);
             const height = Math.max(textureEntry.height >>> mipLevel, 1);
             const depth = 1;
@@ -277,6 +315,7 @@ export class BRTITextureHolder extends GroupedTextureHolder {
         const channelFormat = getChannelFormat(textureEntry.imageFormat);
 
         const allLevelDatas: ArrayBufferView[] = [];
+        const uploadPromises: Promise<void>[] = [];
         let processedMips = 0;
 
         for (let mipLevel = 0; mipLevel < numMips; mipLevel++) {
@@ -289,9 +328,16 @@ export class BRTITextureHolder extends GroupedTextureHolder {
             
             for (let faceIdx = 0; faceIdx < numFaces; faceIdx++) {
                 const mipBuffer = textureEntry.mipBuffers[mipLevel];
-                const buffer = Array.isArray(mipBuffer) ? mipBuffer[faceIdx] as ArrayBufferSlice : mipBuffer as ArrayBufferSlice;
+                let buffer: ArrayBufferSlice;
+                if (Array.isArray(mipBuffer)) {
+                    buffer = getBRTIMipLayerBuffer(mipBuffer, faceIdx);
+                } else {
+                    const packed = getBRTIMipLayerBuffer(mipBuffer);
+                    const layerSize = getBlockLinearMipLayerSize(width, height, channelFormat, blockHeightLog2);
+                    buffer = packed.subarray(faceIdx * layerSize, layerSize);
+                }
                 
-                deswizzle({ buffer, width, height, channelFormat, blockHeightLog2 }).then((deswizzled) => {
+                const p = deswizzle({ buffer, width, height, channelFormat, blockHeightLog2 }).then((deswizzled) => {
                     const rgbaTexture = decompress({ ...textureEntry, width, height, depth }, deswizzled);
                     const rgbaPixels = rgbaTexture.pixels;
                     levelDatas[faceIdx] = rgbaPixels;
@@ -305,6 +351,14 @@ export class BRTITextureHolder extends GroupedTextureHolder {
                         }
                         
                         allLevelDatas[mipLevel] = combinedBuffer;
+                        if (mipLevel === 0)
+                            canvases[0] = this.makeCubemapContactSheet(`${textureEntry.name} uploaded faces`, textureEntry.width, combinedBuffer);
+                        const normalized = new Float32Array(combinedBuffer.length);
+                        for (let j = 0; j < combinedBuffer.length; j++)
+                            normalized[j] = combinedBuffer[j] / 255.0;
+                        const existing = this.cubeCpuLevels.get(textureEntry.name) ?? { size: textureEntry.width, levels: [] };
+                        existing.levels[mipLevel] = normalized;
+                        this.cubeCpuLevels.set(textureEntry.name, existing);
                         processedMips++;
                         
                         if (processedMips === numMips) {
@@ -312,14 +366,28 @@ export class BRTITextureHolder extends GroupedTextureHolder {
                         }
                     }
                     
-                    if (mipLevel === 0 && faceIdx === 0) {
+                    if (mipLevel === 0) {
                         const canvas = document.createElement('canvas');
                         surfaceToCanvas(canvas, rgbaTexture);
-                        canvases.push(canvas);
+                        canvas.title = `face ${faceIdx}`;
+                        canvases[faceIdx + 1] = canvas;
                     }
+                }).catch((e) => {
+                    console.warn('smo cubemap face decode failed', {
+                        textureName: textureEntry.name,
+                        mipLevel,
+                        faceIdx,
+                        width,
+                        height,
+                        packed: !Array.isArray(mipBuffer),
+                        error: e,
+                    });
                 });
+                uploadPromises.push(p);
             }
         }
+
+        this.pendingUploads.push(Promise.all(uploadPromises).then(() => {}));
 
         const extraInfo = new Map<string, string>();
         extraInfo.set('Format', getImageFormatString(textureEntry.imageFormat));
@@ -328,14 +396,91 @@ export class BRTITextureHolder extends GroupedTextureHolder {
         super.addTexture(gfxTexture, viewerTexture, scope);
     }
 
+    private convertEncodedFloatTextureToU8(data: Float32Array): Uint8Array {
+        const out = new Uint8Array(data.length);
+        for (let i = 0; i < data.length; i++)
+            out[i] = Math.round(clamp(data[i], 0, 1) * 255.0);
+        return out;
+    }
+
+    private makeCubemapContactSheet(name: string, size: number, data: Uint8Array): HTMLCanvasElement {
+        const canvas = document.createElement('canvas');
+        canvas.width = size * 6;
+        canvas.height = size;
+        canvas.title = name;
+        const ctx = assertExists(canvas.getContext('2d'));
+        for (let face = 0; face < 6; face++) {
+            const imageData = ctx.createImageData(size, size);
+            const faceOffs = face * size * size * 4;
+            imageData.data.set(data.subarray(faceOffs, faceOffs + size * size * 4));
+            ctx.putImageData(imageData, face * size, 0);
+        }
+        return canvas;
+    }
+
+    public addGeneratedCubemapTexture(device: GfxDevice, generated: GeneratedLightMapCube, scope: TextureScopeKey, groupLabel = 'Generated Material Light'): void {
+        if (this.fillTextureMapping(new TextureMapping(), generated.name))
+            return;
+        const gfxTexture = device.createTexture({
+            dimension: GfxTextureDimension.Cube,
+            // The light-map shader outputs HDR-encoded LDR texels. Store them as
+            // normalized U8 so WebGL can bind them to normal filterable Float samplers.
+            pixelFormat: GfxFormat.U8_RGBA_NORM,
+            width: generated.size,
+            height: generated.size,
+            depthOrArrayLayers: 6,
+            numLevels: generated.numLevels,
+            usage: GfxTextureUsage.Sampled,
+        });
+        const uploadLevels = generated.levels.map((level) => this.convertEncodedFloatTextureToU8(level));
+        device.uploadTextureData(gfxTexture, 0, uploadLevels);
+        this.cubeCpuLevels.set(generated.name, { size: generated.size, levels: generated.levels });
+        const surfaces = [this.makeCubemapContactSheet(`${generated.name} faces`, generated.size, uploadLevels[0])];
+        const viewerTexture: Viewer.Texture = { name: generated.name, surfaces, extraInfo: new Map([['Format', 'U8_RGBA_NORM encoded HDR cube'], ['Generated', 'alLightMap/alComposeLightMap CPU port'], ['Face order', '+X -X +Y -Y +Z -Z']]) };
+        super.addTexture(gfxTexture, viewerTexture, scope, groupLabel);
+    }
+
+    public addGeneratedTexture2D(device: GfxDevice, generated: GeneratedLightMapSphere, scope: TextureScopeKey, groupLabel = 'Generated Material Light'): void {
+        if (this.fillTextureMapping(new TextureMapping(), generated.name))
+            return;
+        const gfxTexture = device.createTexture({
+            dimension: GfxTextureDimension.n2D,
+            // Sphere material light is sampled raw in RenderMaterial_reference,
+            // unlike the cube path. Keep HDR-ish values in a filterable float format.
+            pixelFormat: GfxFormat.F16_RGBA,
+            width: generated.width,
+            height: generated.height,
+            depthOrArrayLayers: 1,
+            numLevels: 1,
+            usage: GfxTextureUsage.Sampled,
+        });
+        device.uploadTextureData(gfxTexture, 0, [generated.data]);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = generated.width;
+        canvas.height = generated.height;
+        const ctx = assertExists(canvas.getContext('2d'));
+        const imageData = ctx.createImageData(generated.width, generated.height);
+        for (let i = 0; i < generated.data.length; i += 4) {
+            imageData.data[i + 0] = Math.round(clamp(generated.data[i + 0], 0, 1) * 255.0);
+            imageData.data[i + 1] = Math.round(clamp(generated.data[i + 1], 0, 1) * 255.0);
+            imageData.data[i + 2] = Math.round(clamp(generated.data[i + 2], 0, 1) * 255.0);
+            imageData.data[i + 3] = 255;
+        }
+        ctx.putImageData(imageData, 0, 0);
+
+        const viewerTexture: Viewer.Texture = { name: generated.name, surfaces: [canvas], extraInfo: new Map([['Format', 'F16_RGBA raw material sphere light'], ['Generated', 'alLightMap CPU port']]) };
+        super.addTexture(gfxTexture, viewerTexture, scope, groupLabel);
+    }
+
     public addLUTTexture(device: GfxDevice, width: number, color: { r: number; g: number; b: number; a: number }): void {
         const data = new Float32Array(width * 4);
         for (let i = 0; i < width; i++) {
             const o = i * 4;
-            data[o + 0] = color.r / 255.0;
-            data[o + 1] = color.g / 255.0;
-            data[o + 2] = color.b / 255.0;
-            data[o + 3] = color.a / 255.0;
+            data[o + 0] = color.r;
+            data[o + 1] = color.g;
+            data[o + 2] = color.b;
+            data[o + 3] = color.a;
         }
 
         const texture = device.createTexture({
@@ -460,6 +605,7 @@ class MaterialParams {
     public tex_mtx1: Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
     public tex_mtx2: Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
     public tex_mtx3: Texsrt = { mode: 0, scaleS: 1, scaleT: 1, rotation: 0, translationS: 0, translationT: 0 };
+    public mirror_view_proj = mat4.create();
     public sphere_rate_color0 = 1.0;
     public sphere_rate_color1 = 1.0;
     public sphere_rate_color2 = 1.0;
@@ -479,11 +625,11 @@ class MaterialParams {
     public translucence_silhouette_stress = 0.0;
     public cloth_nov_peak_pos0 = 0.0;
     public cloth_nov_peak_pow0 = 0.0;
-    public cloth_nov_tone_intensity0 = 0.0;
+    public cloth_nov_peak_intensity0 = 0.0;
     public cloth_nov_tone_pow0 = 0.0;
     public cloth_nov_slope0 = 0.0;
     public cloth_nov_emission_scale0 = 0.0;
-    public cloth_nov_noise_mask_scale0 = 0.0;
+    public cloth_nov_noise_mask_scale0 = vec3.create();
     public force_roughness = 1.0;
     public material_lod_roughness = 1.0;
     public material_lod_metalness = 0.0;
@@ -515,15 +661,17 @@ class ModelAdditionalInfo {
     public proj_mtx1 = mat4.create();
     public proj_mtx2 = mat4.create();
     public proj_mtx3 = mat4.create();
+    public prog_constant0 = vec4.create();
+    public prog_constant1 = vec4.create();
 }
 
-export function createProgramForMaterial(fmat: FMAT): OdysseyProgram {
+export function createProgramForMaterial(fmat: FMAT, initRippleParam: InitRippleParam | null = null): OdysseyProgram {
     if (fmat.shaderAssign.shaderArchiveName === 'alRenderSky') {
         return new RenderSky(fmat);
     } else if (fmat.shaderAssign.shaderArchiveName === 'alRenderCloudLayer') {
         return new RenderCloudLayer(fmat);
     } else {
-        return new RenderMaterial(fmat);
+        return new RenderMaterial(fmat, findRippleMatParams(initRippleParam, fmat.name).length > 0);
     }
 }
 
@@ -540,6 +688,59 @@ function translateRenderInfoBoolean(renderInfo: FMAT_RenderInfo): boolean {
         return false;
     else
         throw "whoops";
+}
+
+function getRenderInfoSingleString(fmat: FMAT, name: string): string | null {
+    const renderInfo = fmat.renderInfo.get(name);
+    if (renderInfo === undefined || renderInfo.type !== FMAT_RenderInfoType.String || renderInfo.values.length < 1)
+        return null;
+    return renderInfo.values[0] as string;
+}
+
+function findMaterialLightCategoryName(fmat: FMAT, archiveName: string, materialLightCategoryMap?: Map<string, string> | null): string {
+    const mappedCategory = materialLightCategoryMap?.get(fmat.name);
+    if (mappedCategory !== undefined && mappedCategory !== '')
+        return mappedCategory;
+    const defaultCategory = materialLightCategoryMap?.get('Category');
+
+    // executable shows that a "MaterialLightCategory" render-info key may exist
+    const materialLightCategory = getRenderInfoSingleString(fmat, 'MaterialLightCategory');
+    if (materialLightCategory !== null && materialLightCategory !== '' && materialLightCategory !== 'None')
+        return materialLightCategory;
+
+    return 'Default';
+}
+
+function getMaterialLightCategoryFromPreset(preset: any, categoryName: string): any | null {
+    const categories = preset?.MaterialLight?.MaterialLightCategory;
+    return categories.find((category: any) => category?.CategoryName === categoryName)
+        ?? categories.find((category: any) => category?.CategoryName === 'Default')
+        ?? categories[0]
+        ?? null;
+}
+
+function findMaterialLightCategoryFromPreset(preset: any, categoryName: string): any | null {
+    const categories = preset?.MaterialLight?.MaterialLightCategory;
+    return categories.find((category: any) => category?.CategoryName === categoryName)
+        ?? categories[0]
+        ?? null;
+}
+
+function getMaterialLightMapName(category: any): string {
+    const mapName = category?.MapName;
+    return typeof mapName === 'string' ? mapName : '';
+}
+
+function resolveMaterialLightCubeMapName(preset: any, category: any): string {
+    let mapName = getMaterialLightMapName(category);
+    if (mapName !== '')
+        return mapName;
+
+    // al::MaterialLightDirector::getLightMapSampler() treats an empty cube
+    // MapName as a reference to the "Default" material-light category,
+    // while sphere material lights stay black when empty
+    mapName = getMaterialLightMapName(findMaterialLightCategoryFromPreset(preset, 'Default'));
+    return mapName;
 }
 
 function translateCullMode(fmat: FMAT): GfxCullMode {
@@ -592,6 +793,22 @@ function translateBlendDstFactor(fmat: FMAT): GfxBlendFactor {
     return translateRenderInfoBlendFactor(fmat.renderInfo.get('color_blend_rgb_dst_func')!);
 }
 
+function translateBlendAlphaSrcFactor(fmat: FMAT): GfxBlendFactor {
+    const info = fmat.renderInfo.get('color_blend_alpha_src_func');
+    return info !== undefined ? translateRenderInfoBlendFactor(info) : translateBlendSrcFactor(fmat);
+}
+
+function translateBlendAlphaDstFactor(fmat: FMAT): GfxBlendFactor {
+    const info = fmat.renderInfo.get('color_blend_alpha_dst_func');
+    return info !== undefined ? translateRenderInfoBlendFactor(info) : translateBlendDstFactor(fmat);
+}
+
+function isAdditiveXlu(fmat: FMAT): boolean {
+    const forward = getRenderInfoSingleString(fmat, 'forward_xlu') ?? '';
+    const deferred = getRenderInfoSingleString(fmat, 'deferred_xlu') ?? '';
+    return forward.includes('Add') || deferred.includes('Add');
+}
+
 function createDirectionalLightSampler(cache: GfxRenderCache): GfxSampler {
     return cache.createSampler({
         wrapS: GfxWrapMode.Clamp,
@@ -611,14 +828,15 @@ class FMATInstance {
     private gfxProgram: GfxProgram;
     private megaStateFlags: Partial<GfxMegaStateDescriptor>;
     private materialParams: MaterialParams | CloudMaterialParams = new MaterialParams();
+    public modelAdditionalInfo = new ModelAdditionalInfo();
 
-    constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, public fmat: FMAT, private archiveName: string) {
-        this.program = createProgramForMaterial(fmat);
+    constructor(device: GfxDevice, cache: GfxRenderCache, textureHolder: BRTITextureHolder, public fmat: FMAT, private archiveName: string, private materialLightCategoryMap: Map<string, string> | null = null, private initRippleParam: InitRippleParam | null = null) {
+        this.program = createProgramForMaterial(fmat, initRippleParam);
 
         // Fill in our texture mappings.
         assert(fmat.samplerInfo.length === fmat.textureName.length);
 
-        this.textureMapping = nArray(14, () => new TextureMapping());
+        this.textureMapping = nArray(16, () => new TextureMapping());
         for (let i = 0; i < fmat.samplerInfo.length; i++) {
             const samplerInfo = fmat.samplerInfo[i];
             const gfxSampler = cache.createSampler({
@@ -632,20 +850,27 @@ class FMATInstance {
             });
             this.gfxSamplers.push(gfxSampler);
 
-            const textureName = fmat.textureName[i];
-            const scope: TextureScopeKey = {archiveName: this.archiveName};
+            if (i < 8) {
+                const textureName = fmat.textureName[i];
+                const scope: TextureScopeKey = {archiveName: this.archiveName};
 
-            const foundScoped = textureHolder.fillScopedTextureMapping(this.textureMapping[i], textureName, scope);
-            if (!foundScoped) {
-                textureHolder.fillTextureMapping(this.textureMapping[i], textureName);
+                const foundScoped = textureHolder.fillScopedTextureMapping(this.textureMapping[i], textureName, scope);
+                if (!foundScoped)
+                    textureHolder.fillTextureMapping(this.textureMapping[i], textureName);
+
+                this.textureMapping[i].gfxSampler = gfxSampler;
             }
+        }
 
-            this.textureMapping[i].gfxSampler = gfxSampler;
+        if (fmat.shaderAssign.shaderArchiveName !== 'alRenderCloudLayer') {
+            for (const assignment of this.program.getMaterialSamplerSlotAssignments())
+                this.fillMaterialSamplerBinding(textureHolder, assignment.textureUnit, assignment.samplerIndex);
         }
 
         const cubemapTextureName = 'Default_' + textureHolder.cubeMapSuffixName;
+        let cubemapSampler: GfxSampler | null = null;
         if (cubemapTextureName) {
-            const gfxSampler = cache.createSampler({
+            cubemapSampler = cache.createSampler({
                 minFilter: GfxTexFilterMode.Bilinear,
                 magFilter: GfxTexFilterMode.Bilinear,
                 mipFilter: GfxMipFilterMode.Linear,
@@ -654,12 +879,10 @@ class FMATInstance {
                 wrapS: GfxWrapMode.Clamp,
                 wrapT: GfxWrapMode.Clamp,
             });
-            this.gfxSamplers.push(gfxSampler);
+            this.gfxSamplers.push(cubemapSampler);
 
             textureHolder.fillTextureMapping(this.textureMapping[OdysseyProgram._m0], cubemapTextureName);
-            this.textureMapping[OdysseyProgram._m0].gfxSampler = gfxSampler;
-        } else {
-            console.info('No cubemap found for material', fmat.name);
+            this.textureMapping[OdysseyProgram._m0].gfxSampler = cubemapSampler;
         }
 
         const lutSampler = createDirectionalLightSampler(cache);
@@ -673,9 +896,62 @@ class FMATInstance {
 
         this.textureMapping[OdysseyProgram._ld0].gfxTexture = textureHolder.linearDepthTexture;
         this.textureMapping[OdysseyProgram._ld0].gfxSampler = lutSampler;
+        this.textureMapping[OdysseyProgram._ld0].lateBinding = kLateBindingLinearDepth;
 
         this.textureMapping[OdysseyProgram._fb0].gfxTexture = textureHolder.framebufferTexture.getTextureForSampling();
         this.textureMapping[OdysseyProgram._fb0].gfxSampler = lutSampler;
+        this.textureMapping[OdysseyProgram._fb0].lateBinding = kLateBindingFramebuffer;
+
+        // WebGL limits us to 16 samplers so we don't have room for a second cubemap slot
+        // If a material uses cTextureMaterialLightCube, we bind it to the first cubemap
+        // slot instead of the roughness cubemap
+        const enableMaterialLight = this.fmat.shaderAssign.shaderOption.get('enable_material_light') ?? this.fmat.shaderAssign.shaderOption.get('cIsEnableMaterialLight');
+        let boundGeneratedMaterialLightSphere = false;
+        if (enableMaterialLight === '1' || enableMaterialLight === 'true') {
+            const presetAny = OdysseyRenderer.graphicsPreset as any;
+            const materialLightCategoryName = findMaterialLightCategoryName(this.fmat, this.archiveName, this.materialLightCategoryMap);
+            const selectedMaterialLightCategory = getMaterialLightCategoryFromPreset(presetAny, materialLightCategoryName);
+            const materialLightMapName = resolveMaterialLightCubeMapName(presetAny, selectedMaterialLightCategory);
+            const materialLightSphereMapName = selectedMaterialLightCategory?.SphereMapName;
+            if (typeof materialLightMapName === 'string' && materialLightMapName.length > 0) {
+                const lightMapParam = OdysseyRenderer.lightMapList.get(materialLightMapName);
+                let boundTextureName = cubemapTextureName;
+                if (lightMapParam !== undefined && lightMapParam.isEnable) {
+                    const generatedTextureName = `MaterialLight:${materialLightMapName}`;
+                    const composedTextureName = `MaterialLightCompose:${materialLightMapName}:${textureHolder.cubeMapSuffixName}`;
+                    if (!textureHolder.hasTexture(composedTextureName)) {
+                        const generated = generateLightMapCube(lightMapParam, generatedTextureName);
+                        const areaCube = textureHolder.getCubeTextureCpuLevels(cubemapTextureName);
+                        const composed = composeLightMapCube(generated, areaCube?.levels ?? null, areaCube?.size ?? generated.size, composedTextureName);
+                        textureHolder.addGeneratedCubemapTexture(device, composed, { archiveName: this.archiveName });
+                    }
+                    boundTextureName = composedTextureName;
+                }
+                textureHolder.fillTextureMapping(this.textureMapping[OdysseyProgram._m0], boundTextureName);
+                this.textureMapping[OdysseyProgram._m0].gfxSampler = cubemapSampler;
+
+                if (typeof materialLightSphereMapName === 'string' && materialLightSphereMapName.length > 0) {
+                    const sphereParam = OdysseyRenderer.lightMapList.get(materialLightSphereMapName) ?? lightMapParam;
+                    if (sphereParam !== undefined && sphereParam.isEnable) {
+                        const sphereName = `MaterialLightSphere:${materialLightSphereMapName}`;
+                        if (!textureHolder.hasTexture(sphereName)) {
+                            const sphere = generateLightMapSphere(sphereParam, sphereName);
+                            textureHolder.addGeneratedTexture2D(device, sphere, { archiveName: this.archiveName });
+                        }
+                        textureHolder.fillTextureMapping(this.textureMapping[OdysseyProgram._mls0], sphereName);
+                        this.textureMapping[OdysseyProgram._mls0].gfxSampler = cubemapSampler;
+                        boundGeneratedMaterialLightSphere = true;
+                    }
+                }
+
+            } else {
+                this.fillSpecialSamplerBinding(textureHolder, OdysseyProgram._m0, 'cTextureMaterialLightCube');
+            }
+        }
+        if (!boundGeneratedMaterialLightSphere)
+            this.fillSpecialSamplerBinding(textureHolder, OdysseyProgram._mls0, 'cTextureMaterialLightSphere');
+        this.fillSpecialSamplerBinding(textureHolder, OdysseyProgram._pt2d0, 'cTextureProcTexture2D');
+        this.fillSpecialSamplerBinding(textureHolder, OdysseyProgram._pt3d0, 'cTextureProcTexture3D');
 
         this.gfxProgram = cache.createProgram(this.program);
 
@@ -705,25 +981,61 @@ class FMATInstance {
             });
             this.parseCloudMaterialParams(fmat);
         } else {
+            const additiveXlu = isTranslucent && isAdditiveXlu(fmat);
+            const rippleMatParams = findRippleMatParams(this.initRippleParam, fmat.name);
+            const isRippleXlu = isTranslucent && rippleMatParams.length > 0;
+            const enableTransparent = this.fmat.shaderAssign.shaderOption.get('enable_transparent') === '1';
+            const enableXluZPrepass = getRenderInfoSingleString(fmat, 'enable_xlu_zprepass') === 'true';
+            const depthWrite = isTranslucent
+                ? (!additiveXlu && (enableTransparent || enableXluZPrepass) && translateDepthWrite(fmat))
+                : translateDepthWrite(fmat);
             this.megaStateFlags = {
                 cullMode:       translateCullMode(fmat),
                 depthCompare:   reverseDepthForCompareMode(translateDepthCompare(fmat)),
-                depthWrite:     isTranslucent ? false : translateDepthWrite(fmat),
+                depthWrite,
             };
             setAttachmentStateSimple(this.megaStateFlags, {
                 blendMode: GfxBlendMode.Add,
-                blendSrcFactor: isTranslucent ? translateBlendSrcFactor(fmat) : GfxBlendFactor.One,
-                blendDstFactor: isTranslucent ? translateBlendDstFactor(fmat) : GfxBlendFactor.Zero,
+                blendSrcFactor: additiveXlu ? GfxBlendFactor.One : (isRippleXlu ? GfxBlendFactor.SrcAlpha : (isTranslucent ? translateBlendSrcFactor(fmat) : GfxBlendFactor.One)),
+                blendDstFactor: additiveXlu ? GfxBlendFactor.One : (isRippleXlu ? GfxBlendFactor.OneMinusSrcAlpha : (isTranslucent ? translateBlendDstFactor(fmat) : GfxBlendFactor.Zero)),
             });
+            if (isTranslucent && this.megaStateFlags.attachmentsState !== undefined) {
+                this.megaStateFlags.attachmentsState[0].alphaBlendState.blendSrcFactor = isRippleXlu ? GfxBlendFactor.SrcAlpha : translateBlendAlphaSrcFactor(fmat);
+                this.megaStateFlags.attachmentsState[0].alphaBlendState.blendDstFactor = isRippleXlu ? GfxBlendFactor.OneMinusSrcAlpha : translateBlendAlphaDstFactor(fmat);
+            }
             this.parseMaterialParams(fmat);
         }
     }
 
-    // TODO: include material uniforms
+    private fillMaterialSamplerBinding(textureHolder: BRTITextureHolder, dstIndex: number, samplerIndex: number): void {
+        const textureName = this.fmat.textureName[samplerIndex];
+        const scope: TextureScopeKey = {archiveName: this.archiveName};
+        const foundScoped = textureHolder.fillScopedTextureMapping(this.textureMapping[dstIndex], textureName, scope);
+        if (!foundScoped)
+            textureHolder.fillTextureMapping(this.textureMapping[dstIndex], textureName);
+
+        this.textureMapping[dstIndex].gfxSampler = this.gfxSamplers[samplerIndex];
+    }
+
+    private fillSpecialSamplerBinding(textureHolder: BRTITextureHolder, dstIndex: number, shaderSamplerName: string): void {
+        const samplerName = this.fmat.shaderAssign.samplerAssign.get(shaderSamplerName);
+        if (samplerName === undefined)
+            return;
+
+        const samplerIndex = this.fmat.samplerInfo.findIndex((sampler) => sampler.name === samplerName);
+        if (samplerIndex < 0)
+            return;
+
+        this.fillMaterialSamplerBinding(textureHolder, dstIndex, samplerIndex);
+    }
+
     public setOnRenderInst(device: GfxDevice, renderInst: GfxRenderInst): void {
         const isTranslucent = (this.program instanceof RenderMaterial) ? this.program.isTranslucent : false;
         const materialLayer = isTranslucent ? GfxRendererLayer.TRANSLUCENT : GfxRendererLayer.OPAQUE;
         renderInst.sortKey = makeSortKey(materialLayer, 0);
+        const drawPriority = this.fmat.renderInfo.get('draw_priority')?.values[0];
+        if (isTranslucent && typeof drawPriority === 'number')
+            renderInst.sortKey = setSortKeyBias(renderInst.sortKey, drawPriority);
         renderInst.setSamplerBindingsFromTextureMappings(this.textureMapping);
         renderInst.setGfxProgram(this.gfxProgram);
         renderInst.setMegaStateFlags(this.megaStateFlags);
@@ -736,6 +1048,7 @@ class FMATInstance {
     private parseMaterialParams(fmat: FMAT): void {
         const params = fmat.shaderParam;
         const materialParams = new MaterialParams();
+        const modelAdditionalInfo = new ModelAdditionalInfo();
 
         for (const p of params) {
             switch (p.name) {
@@ -756,11 +1069,10 @@ class FMATInstance {
                 case 'indirect_depth_scale':
                 case 'cloth_nov_peak_pos0':
                 case 'cloth_nov_peak_pow0':
-                case 'cloth_nov_tone_intensity0':
+                case 'cloth_nov_peak_intensity0':
                 case 'cloth_nov_tone_pow0':
                 case 'cloth_nov_slope0':
                 case 'cloth_nov_emission_scale0':
-                case 'cloth_nov_noise_mask_scale0':
                 case 'displacement_scale':
                 case 'displacement1_scale':
                 case 'force_roughness':
@@ -774,15 +1086,31 @@ class FMATInstance {
                     materialParams[p.name] = parseFMAT_ShaderParam_Float(p);
                     break;
 
+                case 'model_alpha_mask':
+                case 'normal_axis_x_scale':
+                    modelAdditionalInfo[p.name] = parseFMAT_ShaderParam_Float(p);
+                    break;
+
                 case 'indirect0_scale':
                 case 'indirect1_scale':
                     if (!materialParams[p.name]) materialParams[p.name] = vec2.create();
                     parseFMAT_ShaderParam_Float2(materialParams[p.name], p);
                     break;
 
+                case 'uv_offset':
+                    parseFMAT_ShaderParam_Float2(modelAdditionalInfo.uv_offset, p);
+                    break;
+
                 case 'proc_texture_3d_scale':
                     if (!materialParams[p.name]) materialParams[p.name] = vec3.create();
                     parseFMAT_ShaderParam_Float3(materialParams[p.name], p);
+                    break;
+
+                case 'cloth_nov_noise_mask_scale0':
+                    // Nintendo declares this as a vec3 but some materials provide an array.
+                    // the shader only uses .y anyway so just expand
+                    if (!materialParams[p.name]) materialParams[p.name] = vec3.create();
+                    fillVec3FromFMATParam(materialParams[p.name], p);
                     break;
 
                 case 'const_color0':
@@ -807,6 +1135,11 @@ class FMATInstance {
                     parseFMAT_ShaderParam_Float4(materialParams[p.name], p);
                     break;
 
+                case 'prog_constant0':
+                case 'prog_constant1':
+                    parseFMAT_ShaderParam_Float4(modelAdditionalInfo[p.name], p);
+                    break;
+
                 case 'tex_mtx0':
                 case 'tex_mtx1':
                 case 'tex_mtx2':
@@ -816,7 +1149,14 @@ class FMATInstance {
                     break;
 
                 case 'mirror_view_proj':
-                    // TODO: mirror_view_proj
+                    parseFMAT_ShaderParam_Float4x4(materialParams.mirror_view_proj, p);
+                    break;
+
+                case 'proj_mtx0':
+                case 'proj_mtx1':
+                case 'proj_mtx2':
+                case 'proj_mtx3':
+                    parseFMAT_ShaderParam_Float4x4(modelAdditionalInfo[p.name], p);
                     break;
 
                 default:
@@ -825,6 +1165,7 @@ class FMATInstance {
             }
         }
         this.materialParams = materialParams;
+        this.modelAdditionalInfo = modelAdditionalInfo;
     }
 
     private parseCloudMaterialParams(fmat: FMAT): void {
@@ -922,9 +1263,8 @@ class FMATInstance {
         d[offs++] = materialParams.sphere_rate_color3;
         
         // mirror_view_proj
-        for (let i = 0; i < 16; i++) {
-            d[offs++] = 0.0; // TODO: figure out mirror_view_proj
-        }
+        for (let i = 0; i < 16; i++)
+            d[offs++] = materialParams.mirror_view_proj[i];
         
         d[offs++] = materialParams.decal_range;
         d[offs++] = materialParams.gbuf_fetch_offset;
@@ -936,16 +1276,13 @@ class FMATInstance {
         d[offs++] = materialParams.indirect_depth_scale;
         d[offs++] = materialParams.cloth_nov_peak_pos0;
         d[offs++] = materialParams.cloth_nov_peak_pow0;
-        d[offs++] = materialParams.cloth_nov_tone_intensity0;
+        d[offs++] = materialParams.cloth_nov_peak_intensity0;
         d[offs++] = materialParams.cloth_nov_tone_pow0;
         d[offs++] = materialParams.cloth_nov_slope0;
         
         d[offs++] = materialParams.cloth_nov_emission_scale0;
-        
-        // cloth_nov_noise_mask_scale0 (vec3)
-        d[offs++] = materialParams.cloth_nov_noise_mask_scale0;
-        d[offs++] = 0.0;
-        d[offs++] = 0.0;
+        offs += 3; // std140 padding before vec3 cloth_nov_noise_mask_scale0
+        offs += fillVec3Padded(d, offs, materialParams.cloth_nov_noise_mask_scale0);
         
         // proc_texture_3d_scale (vec4, but vec3 in shader params)
         d[offs++] = materialParams.proc_texture_3d_scale[0];
@@ -1002,19 +1339,62 @@ function fillVec4(d: Float32Array, offs: number, v: vec4): number {
     return 4;
 }
 
+function fillVec3Padded(d: Float32Array, offs: number, v: vec3): number {
+    d[offs++] = v[0];
+    d[offs++] = v[1];
+    d[offs++] = v[2];
+    d[offs++] = 0.0;
+    return 4;
+}
+
+function fillVec3FromFMATParam(dst: vec3, p: FMAT_ShaderParam): void {
+    if (p.rawData.byteLength === 4) {
+        const view = p.rawData.createDataView();
+        const v = view.getFloat32(0, p.littleEndian);
+        dst[0] = 0.0;
+        dst[1] = v;
+        dst[2] = 0.0;
+        return;
+    }
+    parseFMAT_ShaderParam_Float3(dst, p);
+}
+
+function parseFMAT_ShaderParam_Float4x4(dst: mat4, p: FMAT_ShaderParam): void {
+    const view = p.rawData.createDataView();
+    for (let i = 0; i < 16; i++)
+        dst[i] = view.getFloat32(i * 4, p.littleEndian);
+}
+
+function fillModelAdditionalInfo(d: Float32Array, offs: number, info: ModelAdditionalInfo): number {
+    const start = offs;
+
+    d[offs++] = info.model_alpha_mask;
+    d[offs++] = info.normal_axis_x_scale;
+    d[offs++] = info.uv_offset[0];
+    d[offs++] = info.uv_offset[1];
+
+    for (let i = 0; i < 16; i++) d[offs++] = info.proj_mtx0[i];
+    for (let i = 0; i < 16; i++) d[offs++] = info.proj_mtx1[i];
+    for (let i = 0; i < 16; i++) d[offs++] = info.proj_mtx2[i];
+    for (let i = 0; i < 16; i++) d[offs++] = info.proj_mtx3[i];
+
+    offs += fillVec4(d, offs, info.prog_constant0);
+    offs += fillVec4(d, offs, info.prog_constant1);
+
+    return offs - start;
+}
+
 function fillTexsrtAsMatrix2x4(d: Float32Array, offs: number, texsrt: Texsrt): number {
     const c = Math.cos(texsrt.rotation);
     const s = Math.sin(texsrt.rotation);
-    
     d[offs++] = texsrt.scaleS * c;
     d[offs++] = texsrt.scaleT * -s;
-    d[offs++] = 0.0;
     d[offs++] = texsrt.translationS;
-    
     d[offs++] = texsrt.scaleS * s;
     d[offs++] = texsrt.scaleT * c;
-    d[offs++] = 0.0;
     d[offs++] = texsrt.translationT;
+    d[offs++] = 0.0;
+    d[offs++] = 0.0;
     
     return 8; // vec4 * 2
 }
@@ -1204,7 +1584,7 @@ export class FMDLData {
     public fvtxData: FVTXData[] = [];
     public fshpData: FSHPData[] = [];
 
-    constructor(cache: GfxRenderCache, public fmdl: FMDL) {
+    constructor(cache: GfxRenderCache, public fmdl: FMDL, public materialLightCategoryMap: Map<string, string> | null = null, public initRippleParam: InitRippleParam | null = null) {
         for (let i = 0; i < fmdl.fvtx.length; i++)
             this.fvtxData.push(new FVTXData(cache.device, fmdl.fvtx[i]));
         for (let i = 0; i < fmdl.fshp.length; i++) {
@@ -1282,27 +1662,31 @@ class FSHPInstance {
     private fillMdlEnvView(d: Float32Array, offs: number, viewerInput: Viewer.ViewerRenderInput, modelMatrix: mat4): number {
         const preset = OdysseyRenderer.graphicsPreset!;
         
-        d[offs++] = 1.0;  // HDRTranslate_uHDRPower
-        d[offs++] = 2.2;  // HDRTranslate_uDynamicRange
+        d[offs++] = 4.0;     // HDRTranslate_uHDRPower
+        d[offs++] = 1024.0;  // HDRTranslate_uDynamicRange
         offs += 2;          // padding
+
+        const viewMatrix = scratchMatrix;
+        computeViewMatrix(viewMatrix, viewerInput.camera);
 
         let dir: { x: number; y: number; z: number } = {x: 0, y: 0, z: 0};
         if (preset !== null)
             dir = latLonToDirection(preset.DirectionalLight.DirectionParam.Y, preset.DirectionalLight.DirectionParam.X);
 
-        // const lightDir = vec3.fromValues(0.3, 0.9, -0.2);
-        const lightDir = vec3.fromValues(-dir.x, -dir.y, -dir.z);
-        vec3.normalize(lightDir, lightDir);
+        // DirectionParam gives LightDirFrom, then
+        // GraphicsSystemInfo::tryDirectionalLightInfo negates it, then
+        // SimpleModelEnv transforms it into view space before writing cDirLightViewDirFetchPos
+        const lightDirWorld = vec3.fromValues(-dir.x, -dir.y, -dir.z);
+        const lightDirView = vec3.create();
+        vec3.transformMat3(lightDirView, lightDirWorld, mat3.fromMat4(mat3.create(), viewMatrix));
+        vec3.normalize(lightDirView, lightDirView);
+
         // cDirLightViewDirFetchPos
-        d[offs++] = lightDir[0];
-        d[offs++] = lightDir[1];
-        d[offs++] = lightDir[2];
-        d[offs++] = 0.5; // LUT position
+        d[offs++] = lightDirView[0];
+        d[offs++] = lightDirView[1];
+        d[offs++] = lightDirView[2];
+        d[offs++] = 1.0; // DirectionalLightKeeper::getTextureFetchPos()
 
-        // console.log(`Light Dir: (${lightDir[0].toFixed(3)}, ${lightDir[1].toFixed(3)}, ${lightDir[2].toFixed(3)})`);
-
-        const viewMatrix = scratchMatrix;
-        computeViewMatrix(viewMatrix, viewerInput.camera);
         offs += fillMatrix4x3(d, offs, viewMatrix);
         
         const viewInv = mat4.create();
@@ -1334,17 +1718,20 @@ class FSHPInstance {
         d[offs++] = 1.0;  // uIrradianceScale
         offs += 2;
         
-        d[offs++] = 0.1;      // cNear
-        d[offs++] = 100000.0; // cFar
-        d[offs++] = 100000.0 - 0.1;  // cRange
-        d[offs++] = 1.0 / (100000.0 - 0.1); // cInvRange
+        const near = viewerInput.camera.near;
+        const far = viewerInput.camera.far;
+        const range = far - near;
+        d[offs++] = near;
+        d[offs++] = far;
+        d[offs++] = range;
+        d[offs++] = 1.0 / range;
         
         // cTanFovyHalf (vec2)
-        d[offs++] = 1.0;  // cTanFovyHalf.x
-        d[offs++] = 1.0;  // cTanFovyHalf.y
+        d[offs++] = viewerInput.camera.right / near;
+        d[offs++] = viewerInput.camera.top / near;
         // cScrProjOffset (vec2)
-        d[offs++] = 0.0;  // cScrProjOffset.x
-        d[offs++] = 0.0;  // cScrProjOffset.y
+        d[offs++] = 0.0;
+        d[offs++] = 0.0;
         
         // cScrSize (vec4)
         d[offs++] = viewerInput.backbufferWidth;
@@ -1357,6 +1744,10 @@ class FSHPInstance {
         d[offs++] = viewerInput.camera.worldMatrix[13];
         d[offs++] = viewerInput.camera.worldMatrix[14];
         offs += 1; // padding
+
+        // cGlobalLodBias, TODO: graphics quality params
+        d[offs++] = 0.0;
+        offs += 3; // padding
 
         let fog = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1 };
         let yFog = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1 };
@@ -1396,7 +1787,7 @@ class FSHPInstance {
         d[offs++] = viewAxisY[0];
         d[offs++] = viewAxisY[1];
         d[offs++] = viewAxisY[2];
-        offs += 1; // padding
+        d[offs++] = 0.0;
         
         // cViewAxisZ
         const worldForward = vec3.fromValues(0.0, 0.0, 1.0);
@@ -1405,8 +1796,7 @@ class FSHPInstance {
         d[offs++] = viewAxisZ[0];
         d[offs++] = viewAxisZ[1];
         d[offs++] = viewAxisZ[2];
-        offs += 1; // padding
-
+        d[offs++] = 0.0;
         
         return offs;
     }
@@ -1425,25 +1815,26 @@ class FSHPInstance {
         offs += fillMatrix4x3(d, offs, viewerInput.camera.viewMatrix);
         offs += fillMatrix4x3(d, offs, modelMatrix);
 
-        // ub_MdlEnvView has camera, environment, now ub_HDRTranslate, and now fog data
-        const mdlEnvOffs = template.allocateUniformBuffer(OdysseyProgram.ub_MdlEnvView, 148);
+        // ub_MdlEnvView has camera, environment, HDRTranslate, cGlobalLodBias, and fog data.
+        const mdlEnvOffs = template.allocateUniformBuffer(OdysseyProgram.ub_MdlEnvView, 152);
         const envData = template.mapUniformBufferF32(OdysseyProgram.ub_MdlEnvView);
         this.fillMdlEnvView(envData, mdlEnvOffs, viewerInput, modelMatrix);
          
         // ub_CloudMaterial
         if (this.fmatInstance.fmat.shaderAssign.shaderArchiveName === 'alRenderCloudLayer') {
-            const matOffs = template.allocateUniformBuffer(OdysseyProgram.ub_Material, 200); // TODO: calculate right size
+            const matOffs = template.allocateUniformBuffer(OdysseyProgram.ub_Material, 44);
             const matData = template.mapUniformBufferF32(OdysseyProgram.ub_Material);
             this.fmatInstance.fillCloudMaterialParams(matData, matOffs);
         } else { // ub_Material
-            const matOffs = template.allocateUniformBuffer(OdysseyProgram.ub_Material, 200); // TODO: calculate right size
+            const matOffs = template.allocateUniformBuffer(OdysseyProgram.ub_Material, 164);
             const matData = template.mapUniformBufferF32(OdysseyProgram.ub_Material);
             this.fmatInstance.fillMaterialParams(matData, matOffs);
         }
  
         // ub_ModelAdditionalInfo
-        template.allocateUniformBuffer(OdysseyProgram.ub_ModelAdditionalInfo, 16 + 16 + 8 + 64 + 64 + 64 + 64 + 16 + 16);
+        const modelAddOffs = template.allocateUniformBuffer(OdysseyProgram.ub_ModelAdditionalInfo, 76);
         const modelAddData = template.mapUniformBufferF32(OdysseyProgram.ub_ModelAdditionalInfo);
+        fillModelAdditionalInfo(modelAddData, modelAddOffs, this.fmatInstance.modelAdditionalInfo);
         
         this.fmatInstance.setOnRenderInst(device, template);
 
@@ -1471,7 +1862,7 @@ export class FMDLRenderer {
         this.name = fmdl.name;
 
         for (let i = 0; i < fmdl.fmat.length; i++)
-            this.fmatInst.push(new FMATInstance(device, cache, this.textureHolder, fmdl.fmat[i], archiveName));
+            this.fmatInst.push(new FMATInstance(device, cache, this.textureHolder, fmdl.fmat[i], archiveName, this.fmdlData.materialLightCategoryMap, this.fmdlData.initRippleParam));
 
         for (let i = 0; i < this.fmdlData.fshpData.length; i++) {
             const fshpData = this.fmdlData.fshpData[i];
@@ -1542,6 +1933,7 @@ export class BasicFRESRenderer {
     public renderHelper: GfxRenderHelper;
     private renderInstListSky = new GfxRenderInstList();
     private renderInstListMain = new GfxRenderInstList();
+    private renderInstListTranslucent = new GfxRenderInstList();
     public fmdlRenderers: FMDLRenderer[] = [];
     public skyRenderers: SkyRenderer[] = [];
 
@@ -1556,11 +1948,10 @@ export class BasicFRESRenderer {
     private fullscreenInputLayout: GfxInputLayout | null = null;
 
     private exposureSlider: UI.Slider;
-    private enableHDR: UI.Checkbox;
-    private justChangedHDR: boolean = false;
-    private useOriginalExposure: UI.Checkbox;
 
-    private exposure: number = 0.05;
+    private exposure: number = 1.0;
+    private autoExposure: number = 1.0;
+    private exposureTextureData = new Float32Array(4);
 
     private device: GfxDevice;
 
@@ -1606,31 +1997,59 @@ export class BasicFRESRenderer {
     }
 
     private createExposureTexture(device: GfxDevice, textureHolder: BRTITextureHolder): void {
-        // 1x1 texture
         this.exposureTexture = device.createTexture(makeTextureDescriptor2D(GfxFormat.F32_RGBA, 1, 1, 1));
-        let exposure = this.exposure;
-        if (this.useOriginalExposure !== undefined && this.useOriginalExposure.checked) {
-            const preset = OdysseyRenderer.graphicsPreset!;
-            exposure = preset.HdrCompose.Exposure;
-            console.log(exposure);
-        }
-        const exposureData = new Float32Array([exposure, exposure, exposure, exposure]);
-        device.uploadTextureData(this.exposureTexture, 0, [exposureData]);
+        this.resetExposureTexture();
         
         const name = "Exposure";
         textureHolder.gfxTextures.push(this.exposureTexture);
         // TODO: Fill viewer texture with data
-        const viewerTexture: Viewer.Texture = { name, surfaces: [], extraInfo: new Map([['Format', 'F32_RGBA']]) };
+        const canvas = document.createElement('canvas');
+        canvas.width = 1;
+        canvas.height = 1;
+        const ctx = assertExists(canvas.getContext('2d'));
+        const imageData = ctx.createImageData(1, 1);
+        imageData.data[0] = 255; imageData.data[1] = 255; imageData.data[2] = 255; imageData.data[3] = 255;
+        ctx.putImageData(imageData, 0, 0);
+        const viewerTexture: Viewer.Texture = { name, surfaces: [canvas], extraInfo: new Map([['Format', 'F32_RGBA']]) };
         textureHolder.viewerTextures.push(viewerTexture);
         textureHolder.textureNames.push(name);
     }
 
-    private updateExposureTexture(): void {
-        if (!this.exposureTexture)
+    private uploadExposureTexture(exposure: number): void {
+        if (!this.exposureTexture) return;
+        this.exposureTextureData[0] = exposure;
+        this.exposureTextureData[1] = exposure;
+        this.exposureTextureData[2] = exposure;
+        this.exposureTextureData[3] = exposure;
+        this.device.uploadTextureData(this.exposureTexture, 0, [this.exposureTextureData]);
+    }
+
+    private resetExposureTexture(): void {
+        this.autoExposure = 1.0;
+        this.uploadExposureTexture(this.autoExposure);
+    }
+
+    private updateCPUAutoExposure(viewerInput: Viewer.ViewerRenderInput): void {
+        const hdr = OdysseyRenderer.graphicsPreset?.HdrCompose;
+        if (hdr === undefined) {
+            this.uploadExposureTexture(this.autoExposure);
             return;
-        const exposure = this.exposure;
-        const exposureData = new Float32Array([exposure, exposure, exposure, exposure]);
-        this.device.uploadTextureData(this.exposureTexture, 0, [exposureData]);
+        }
+
+        // TODO: move to GPU?
+        const rangeMin = Math.max(0.001, Math.min(hdr.AutoExposureRangeMin, hdr.AutoExposureRangeMax));
+        const rangeMax = Math.max(rangeMin, Math.max(hdr.AutoExposureRangeMin, hdr.AutoExposureRangeMax));
+        const targetExposure = clamp(Math.pow(2.0, hdr.AutoExposureMid), rangeMin, rangeMax);
+
+        const rate = targetExposure > this.autoExposure ? hdr.AutoExposureBlendRateUp : hdr.AutoExposureBlendRateDown;
+        const frameScale = Math.max(0.0, viewerInput.deltaTime / (1.0 / 60.0));
+        const blend = 1.0 - Math.pow(Math.max(0.0, 1.0 - rate), frameScale);
+        this.autoExposure += (targetExposure - this.autoExposure) * blend;
+        this.uploadExposureTexture(this.autoExposure);
+    }
+
+    private updateExposureSliderLabel(): void {
+        this.exposureSlider.setLabel("Exposure: " + this.exposureSlider.getValue());
     }
 
     public createPanels(): UI.Panel[] {
@@ -1643,29 +2062,14 @@ export class BasicFRESRenderer {
         cameraPanel.setTitle(UI.RENDER_HACKS_ICON, 'Camera Debug');
 
         this.exposureSlider = new UI.Slider();
-        this.exposureSlider.setRange(0, 0.5, 0.001);
-        this.exposureSlider.setLabel("Exposure: " + this.exposureSlider.getValue());
-        this.exposureSlider.setValue(0.05);
+        this.exposureSlider.setRange(0, 10, 0.05);
+        this.exposureSlider.setValue(1.0);
+        this.updateExposureSliderLabel();
         this.exposureSlider.onvalue = () => {
-            this.exposureSlider.setLabel("Exposure: " + this.exposureSlider.getValue());
             this.exposure = this.exposureSlider.getValue();
-            this.updateExposureTexture();
+            this.updateExposureSliderLabel();
         };
         cameraPanel.contents.appendChild(this.exposureSlider.elem);
-
-        this.enableHDR = new UI.Checkbox("Enable HDR");
-        this.enableHDR.checked = false;
-        this.enableHDR.onchanged = () => {
-            this.justChangedHDR = true;
-        }
-        cameraPanel.contents.appendChild(this.enableHDR.elem);
-
-        this.useOriginalExposure = new UI.Checkbox("Use Original Exposure");
-        this.useOriginalExposure.checked = false;
-        cameraPanel.contents.appendChild(this.useOriginalExposure.elem);
-        this.useOriginalExposure.onchanged = () => {
-            this.createExposureTexture(this.device, this.textureHolder);
-        }
 
         return [cameraPanel, layersPanel];
     }
@@ -1687,14 +2091,17 @@ export class BasicFRESRenderer {
             this.fmdlRenderers[i].prepareToRender(device, renderInstManager, viewerInput);
         this.renderHelper.renderInstManager.popTemplate();
 
+        // translucent objects on their own render pass
+        const mainInsts = this.renderInstListMain.renderInsts;
+        for (let i = mainInsts.length - 1; i >= 0; i--) {
+            if (!!(getSortKeyLayer(mainInsts[i].sortKey) & GfxRendererLayer.TRANSLUCENT))
+                this.renderInstListTranslucent.renderInsts.push(mainInsts.splice(i, 1)[0]);
+        }
+
         this.renderHelper.prepareToRender();
     }
 
     private renderHdrCompose(device: GfxDevice, builder: any, hdrColorTargetID: GfxrRenderTargetID, viewerInput: Viewer.ViewerRenderInput): GfxrRenderTargetID {
-        if (!this.enableHDR.checked) {
-            return hdrColorTargetID;
-        }
-
         const ldrColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
         const ldrColorTargetID = builder.createRenderTargetID(ldrColorDesc, 'LDR Color');
 
@@ -1702,24 +2109,22 @@ export class BasicFRESRenderer {
             pass.setDebugName('HDR Compose');
             pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, ldrColorTargetID);
             
-            pass.attachResolveTexture(hdrColorTargetID);
-            
             const hdrResolveTextureID = builder.resolveRenderTarget(hdrColorTargetID);
-            
-            const template = this.renderHelper.pushTemplateRenderInst();
-            template.setBindingLayouts(HdrCompose.bindingLayouts);
+            pass.attachResolveTexture(hdrResolveTextureID);
 
             pass.exec((passRenderer: any, scope: any) => {
                 // Get the HDR texture
                 const hdrTexture = scope.getResolveTextureForID(hdrResolveTextureID);
                 
                 const renderInst = this.renderHelper.renderInstManager.newRenderInst();
+                renderInst.setUniformBuffer(this.renderHelper.uniformBuffer);
+                renderInst.setBindingLayouts(HdrCompose.bindingLayouts);
                 
                 // Uniforms
-                let offs = renderInst.allocateUniformBuffer(HdrCompose.ub_HdrComposeInfo, 56);
+                let offs = renderInst.allocateUniformBuffer(HdrCompose.ub_HdrComposeInfo, 60);
                 const d = renderInst.mapUniformBufferF32(HdrCompose.ub_HdrComposeInfo);
                 const preset = OdysseyRenderer.graphicsPreset!;
-                fillHdrComposeUniforms(d, offs, preset);
+                fillHdrComposeUniforms(d, offs, preset, this.exposure);
                 
                 const textureMapping = new TextureMapping();
                 textureMapping.gfxTexture = hdrTexture;
@@ -1735,7 +2140,7 @@ export class BasicFRESRenderer {
                 const exposureMapping = new TextureMapping();
                 exposureMapping.gfxTexture = this.exposureTexture!;
                 exposureMapping.gfxSampler = textureMapping.gfxSampler;
-                
+
                 renderInst.setSamplerBindingsFromTextureMappings([textureMapping, exposureMapping]);
                 
                 // Setup geometry
@@ -1772,14 +2177,13 @@ export class BasicFRESRenderer {
             
             const mainDepthResolveTextureID = builder.resolveRenderTarget(mainDepthTargetID);
             pass.attachResolveTexture(mainDepthResolveTextureID);
-            
-            const template = this.renderHelper.pushTemplateRenderInst();
-            template.setBindingLayouts(LinearDepth.bindingLayouts);
 
             pass.exec((passRenderer: any, scope: any) => {
                 const depthTexture = scope.getResolveTextureForID(mainDepthResolveTextureID);
                 
                 const renderInst = this.renderHelper.renderInstManager.newRenderInst();
+                renderInst.setUniformBuffer(this.renderHelper.uniformBuffer);
+                renderInst.setBindingLayouts(LinearDepth.bindingLayouts);
                 
                 // Uniforms
                 let offs = renderInst.allocateUniformBuffer(LinearDepth.ub_LinearDepthInfo, 4);
@@ -1794,8 +2198,8 @@ export class BasicFRESRenderer {
                 textureMapping.gfxSampler = this.renderHelper.renderCache.createSampler({
                     wrapS: GfxWrapMode.Clamp,
                     wrapT: GfxWrapMode.Clamp,
-                    minFilter: GfxTexFilterMode.Bilinear,
-                    magFilter: GfxTexFilterMode.Bilinear,
+                    minFilter: GfxTexFilterMode.Point,
+                    magFilter: GfxTexFilterMode.Point,
                     mipFilter: GfxMipFilterMode.Nearest,
                     minLOD: 0, maxLOD: 0,
                 });
@@ -1838,8 +2242,15 @@ export class BasicFRESRenderer {
 
         const builder = this.renderHelper.renderGraph.newGraphBuilder();
 
-        const hdrColorDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
+        const hdrColorDesc = new GfxrRenderTargetDescription(GfxFormat.F16_RGBA_RT);
+        hdrColorDesc.setDimensions(viewerInput.backbufferWidth, viewerInput.backbufferHeight, 1);
+        hdrColorDesc.clearColor = standardFullClearRenderPassDescriptor.clearColor;
+        hdrColorDesc.clearDepth = standardFullClearRenderPassDescriptor.clearDepth;
+        hdrColorDesc.clearStencil = standardFullClearRenderPassDescriptor.clearStencil;
         
+        const ldrDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
+        // Screen-fetch/refraction samples this in the material HDR path, so it
+        // must be an opaque-scene HDR snapshot, not the final LDR backbuffer.
         this.textureHolder.framebufferTexture.setDescription(device, hdrColorDesc);
         
         const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.DepthStencil, viewerInput, standardFullClearRenderPassDescriptor);
@@ -1861,7 +2272,7 @@ export class BasicFRESRenderer {
         });
         
         builder.pushPass((pass) => {
-            pass.setDebugName('Main');
+            pass.setDebugName('Main Opaque');
             pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, hdrColorTargetID);
             pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
             pass.exec((passRenderer) => {
@@ -1869,16 +2280,37 @@ export class BasicFRESRenderer {
             });
         });
 
+        const opaqueColorResolveTextureID = builder.resolveRenderTarget(hdrColorTargetID);
+        const linearDepthTargetID = this.renderLinearDepth(device, builder, mainDepthTargetID, viewerInput);
+        const linearDepthResolveTextureID = builder.resolveRenderTarget(linearDepthTargetID);
+
+        builder.pushPass((pass) => {
+            pass.setDebugName('Main Translucent');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, hdrColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
+            pass.attachResolveTexture(opaqueColorResolveTextureID);
+            pass.attachResolveTexture(linearDepthResolveTextureID);
+            pass.exec((passRenderer, scope) => {
+                this.renderInstListTranslucent.resolveLateSamplerBinding(kLateBindingFramebuffer, {
+                    gfxTexture: scope.getResolveTextureForID(opaqueColorResolveTextureID),
+                    gfxSampler: null,
+                    lateBinding: null,
+                });
+                this.renderInstListTranslucent.resolveLateSamplerBinding(kLateBindingLinearDepth, {
+                    gfxTexture: scope.getResolveTextureForID(linearDepthResolveTextureID),
+                    gfxSampler: null,
+                    lateBinding: null,
+                });
+                this.renderInstListTranslucent.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+
+        // auto-exposure texture update
+        this.updateCPUAutoExposure(viewerInput);
+
         const finalColorTargetID = this.renderHdrCompose(device, builder, hdrColorTargetID, viewerInput);
 
         this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, finalColorTargetID);
-        
-        /*
-        builder.pushPass((pass) => {
-            pass.setDebugName('Copy to Framebuffer Texture');
-            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, finalColorTargetID);
-        });
-        builder.resolveRenderTargetToExternalTexture(finalColorTargetID, this.textureHolder.framebufferTexture.getTextureForResolving());
 
         builder.pushPass((pass) => {
             pass.setDebugName('Copy to Onscreen Texture');
@@ -1886,18 +2318,11 @@ export class BasicFRESRenderer {
         });
         builder.resolveRenderTargetToExternalTexture(finalColorTargetID, viewerInput.onscreenTexture);
 
-        const linearDepthTargetID = this.renderLinearDepth(device, builder, mainDepthTargetID, viewerInput);
-        builder.resolveRenderTargetToExternalTexture(linearDepthTargetID, this.textureHolder.linearDepthTexture);
-        */
-
-
-
-        builder.resolveRenderTargetToExternalTexture(finalColorTargetID, viewerInput.onscreenTexture);
-
         this.prepareToRender(device, viewerInput);
         this.renderHelper.renderGraph.execute(builder);
         this.renderInstListSky.reset();
         this.renderInstListMain.reset();
+        this.renderInstListTranslucent.reset();
     }
 
     public destroy(device: GfxDevice): void {

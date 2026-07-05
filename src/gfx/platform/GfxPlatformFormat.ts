@@ -133,6 +133,7 @@ export enum GfxFormat {
     U8_RGB_RT       = makeFormat(FormatTypeFlags.U8,         FormatCompFlags.RGB,  FormatFlags.RenderTarget | FormatFlags.Normalized),
     U8_RGBA_RT      = makeFormat(FormatTypeFlags.U8,         FormatCompFlags.RGBA, FormatFlags.RenderTarget | FormatFlags.Normalized),
     U8_RGBA_RT_SRGB = makeFormat(FormatTypeFlags.U8,         FormatCompFlags.RGBA, FormatFlags.RenderTarget | FormatFlags.Normalized | FormatFlags.sRGB),
+    F16_RGBA_RT     = makeFormat(FormatTypeFlags.F16,        FormatCompFlags.RGBA, FormatFlags.RenderTarget),
 }
 
 export function getFormatCompFlags(fmt: GfxFormat): FormatCompFlags {

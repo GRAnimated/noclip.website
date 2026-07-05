@@ -28,11 +28,49 @@ layout(std140) uniform ub_CloudMaterial {
 ${ubModelAdditionalInfo}
 ${MaterialUniforms}
 
-// Henyey-Greenstein Phase Function
-float PhaseHG(float g, float cosTheta) {
-    float g2 = g * g;
-    float denom = 1.0 + g2 - 2.0 * g * cosTheta;
-    return (1.0 - g2) / (4.0 * PI * pow(denom, 1.5));
+void CalcLdrToHdr(out vec4 hdr, vec4 ldr) {
+    float scale = pow(ldr.a, mdlEnvView.HDRTranslate_uHDRPower) * mdlEnvView.HDRTranslate_uDynamicRange;
+    hdr = vec4(ldr.rgb * scale, scale);
+}
+
+vec4 DecodeCubemap(samplerCube cube, vec3 n, float lod) {
+    vec4 tex = textureLod(cube, n, lod);
+    float scale = pow(tex.a, 4.0) * 1024.0;
+    return vec4(tex.rgb * scale, scale);
+}
+
+vec4 fetchCubeMapIrradianceConvertHdr(samplerCube cube, vec3 dir) {
+    return DecodeCubemap(cube, dir, 5.0);
+}
+
+float calcPhaseFunctionSchlick(float k, float cosTheta) {
+    float tmp = 1.0 - k * cosTheta; // k > 0 => forward scatter, matching alMathUtil.glsl.
+    return (1.0 - k*k) / (4.0 * PI * tmp * tmp);
+}
+
+float calcScatterPhaseFunctionSchlick(float kf, float kb, float fbRate, float cosTheta) {
+    float fs = calcPhaseFunctionSchlick(kf, cosTheta);
+    float bs = calcPhaseFunctionSchlick(-kb, cosTheta);
+    return mix(fs, bs, fbRate);
+}
+
+float calcWrapDiffuse(vec3 nrm, vec3 toLight, vec2 wrapCoef) {
+    float N_L = dot(nrm, toLight);
+    return clamp01((N_L + wrapCoef.x) * wrapCoef.y) * INV_PI;
+}
+
+vec2 calcCloudTexcoordMatrix(mat2x4 mtx, vec2 texCoord) {
+    vec3 r0 = vec3(mtx[0].xyz);
+    vec3 r1 = vec3(mtx[0].w, mtx[1].xy);
+    vec3 uv1 = vec3(texCoord, 1.0);
+    return vec2(dot(uv1, r0), dot(uv1, r1));
+}
+
+vec3 reconstructNormal(vec2 texNormal) {
+    vec3 localNormal;
+    localNormal.xy = texNormal * 2.0 - 1.0;
+    localNormal.z = sqrt(max(0.0, 1.0 - dot(localNormal.xy, localNormal.xy)));
+    return localNormal;
 }
 `;
 
@@ -42,107 +80,104 @@ layout(location = 1) in vec4 _c0;
 layout(location = 2) in vec2 _u0;
 layout(location = 3) in vec4 _n0;
 layout(location = 4) in vec4 _t0;
-layout(location = 5) in vec2 _u1; 
+layout(location = 5) in vec2 _u1;
 
-out vec3 v_Normal;
-out vec4 v_Tangents;
-out vec4 v_Bitangents;
+out vec3 v_NormalWorld;
+out vec3 v_NormalView;
+out vec4 v_TangentsWorld;
+out vec4 v_BitangentsWorld;
 out vec4 v_ViewPos;
 out vec2 v_TexCoord0;
 out vec4 v_VtxColor;
+out vec4 v_LightColor;
+out vec4 v_Irradiance;
 
 void main() {
-    vec3 worldPos  = UnpackMatrix(u_Model) * vec4(_p0, 1.0);
-
+    vec3 worldPos = UnpackMatrix(u_Model) * vec4(_p0, 1.0);
     vec3 viewPos = multMtx34Vec3(mdlEnvView.cView, worldPos);
-    
+
     gl_Position = UnpackMatrix(u_Projection) * vec4(viewPos, 1.0);
 
     v_ViewPos = vec4(viewPos, 1.0);
     v_TexCoord0 = _u0;
     v_VtxColor = _c0;
 
-    v_Normal = normalize((UnpackMatrix(u_Model) * vec4(_n0.xyz, 0.0)).xyz);
+    v_NormalWorld = normalize((UnpackMatrix(u_Model) * vec4(_n0.xyz, 0.0)).xyz);
+    v_NormalView = normalize(rotMtx34Vec3(mdlEnvView.cView, v_NormalWorld));
 
     vec3 tangent = normalize((UnpackMatrix(u_Model) * vec4(_t0.xyz, 0.0)).xyz);
-    v_Tangents.xyz = tangent;
-    v_Tangents.w = _t0.w;
+    v_TangentsWorld = vec4(tangent, _t0.w);
 
-    vec3 bitangent = normalize(cross(v_Normal, tangent) * _t0.w);
-    v_Bitangents = vec4(bitangent, 1.0);
+    vec3 bitangent = normalize(cross(v_NormalWorld, tangent) * _t0.w);
+    v_BitangentsWorld = vec4(bitangent, 1.0);
+
+    v_LightColor = textureLod(u_DirectionalLightLUT, vec2(mdlEnvView.cDirLightViewDirFetchPos.w, 0.5), 0.0);
+
+    vec3 irradianceDir = vec3(v_NormalWorld.x, v_NormalWorld.y, -v_NormalWorld.z);
+    v_Irradiance = fetchCubeMapIrradianceConvertHdr(u_CubemapTexture0, irradianceDir) * mdlEnvView.uIrradianceScale;
 }
 `;
 
 this.frag = `
-in vec3 v_Normal;
-in vec4 v_Tangents;
-in vec4 v_Bitangents;
+in vec3 v_NormalWorld;
+in vec3 v_NormalView;
+in vec4 v_TangentsWorld;
+in vec4 v_BitangentsWorld;
 in vec4 v_ViewPos;
 in vec2 v_TexCoord0;
 in vec4 v_VtxColor;
-
-vec3 ReconstructNormal(vec2 texNormal) {
-    vec3 localNormal;
-    localNormal.xy = texNormal * 2.0 - 1.0;
-    localNormal.z = sqrt(max(0.0, 1.0 - dot(localNormal.xy, localNormal.xy)));
-    return localNormal;
-}
+in vec4 v_LightColor;
+in vec4 v_Irradiance;
 
 void main() {
+    vec2 indirectUV0 = calcCloudTexcoordMatrix(cloudMat.cTexMtxIndirect0, v_TexCoord0);
+    vec2 indirectUV1 = calcCloudTexcoordMatrix(cloudMat.cTexMtxIndirect1, v_TexCoord0);
+    vec2 indirect0 = texture(u_Texture2, indirectUV0).rg * 2.0 - 1.0;
+    vec2 indirect1 = texture(u_Texture3, indirectUV1).rg * 2.0 - 1.0;
+    vec2 indirectOffset = indirect0 * cloudMat.cIndirectScale.x + indirect1 * cloudMat.cIndirectScale.y;
+
+    vec2 albedoUV = calcCloudTexcoordMatrix(cloudMat.cTexMtxAlbedo0, v_TexCoord0) + indirectOffset;
+    vec2 normalUV = calcCloudTexcoordMatrix(cloudMat.cTexMtxNormal0, v_TexCoord0) + indirectOffset;
+
+    vec4 albedoSample = texture(u_Texture0, albedoUV);
+    vec4 normalSample = texture(u_Texture1, normalUV);
+    float density = albedoSample.r;
+
+    vec3 Nw = normalize(v_NormalWorld);
+    vec3 T = normalize(v_TangentsWorld.xyz);
+    vec3 B = normalize(v_BitangentsWorld.xyz);
+    mat3 TBN = mat3(T, B, Nw);
+    vec3 tangentNormal = reconstructNormal(normalSample.rg);
+    Nw = normalize(TBN * tangentNormal);
+    vec3 Nv = normalize(rotMtx34Vec3(mdlEnvView.cView, Nw));
+
     vec3 V = normalize(-v_ViewPos.xyz);
     vec3 L = normalize(mdlEnvView.cDirLightViewDirFetchPos.xyz);
+    vec3 litToPos = -L;
+    float cosTheta = dot(litToPos, V);
 
-    float densitySample = texture(u_Texture0, v_TexCoord0).r;
-    vec4 normalSample = texture(u_Texture1, v_TexCoord0);
-    
-    vec3 N = normalize(v_Normal);
-    vec3 T = normalize(v_Tangents.xyz);
-    vec3 B = normalize(v_Bitangents.xyz);
-    mat3 TBN = mat3(T, B, N);
-    
-    vec3 tangentNormal = ReconstructNormal(normalSample.rg);
-    N = normalize(TBN * tangentNormal);
+    float phase = calcScatterPhaseFunctionSchlick(cloudMat.uPhaseK, cloudMat.uPhaseKBack, cloudMat.uIsoRate, cosTheta);
+    float diffuse = calcWrapDiffuse(Nv, L, cloudMat.WrapCoef);
 
-    float cosTheta = dot(L, V);
-
-    float pForward = PhaseHG(cloudMat.uPhaseK, cosTheta);
-    float pBack    = PhaseHG(-cloudMat.uPhaseKBack, cosTheta);
-    
-    float phase = mix(pForward, pBack, 0.5);
-    
-    phase = mix(phase, INV_PI * 0.25, cloudMat.uIsoRate);
-
-    float wrap = cloudMat.WrapCoef.x;
-    float NdotL = dot(N, L);
-    float diffuse = max(0.0, (NdotL + wrap) / (1.0 + wrap));
-
-    diffuse *= cloudMat.uDiffuseScatterRatePow;
-
-    vec3 baseColor = cloudMat.albedo.rgb * densitySample;
+    vec3 baseColor = cloudMat.albedo.rgb;
+    float alpha = density * cloudMat.albedo.a;
 
     if (${this.getShaderOptionBoolean('cIsMultVertexColor')}) {
         baseColor *= v_VtxColor.rgb;
-    }
-
-    vec3 directLight = diffuse * phase * vec3(1.0);
-    
-    // vec3 ambientLight = vec3(0.1) * cloudMat.cIndirectScale.x; 
-    // TODO: cIndirectScale is pure black
-
-    vec3 ambientLight = vec3(0.8);
-
-    // vec3 finalRGB = ambientLight * (directLight * baseColor); // broken
-
-    vec3 finalRGB = ambientLight;
-
-    float alpha = densitySample * cloudMat.albedo.a;
-    
-    if (${this.getShaderOptionBoolean('cIsMultVertexColor')}) {
         alpha *= v_VtxColor.a;
     }
 
-    gl_FragColor = vec4(finalRGB, alpha);
+    vec3 irradiance = v_Irradiance.rgb;
+    if (${this.getShaderOptionBoolean('cIsEnableSphereLight')}) {
+        vec2 sphereCoords = Nv.xy * vec2(0.5) + vec2(0.5);
+        irradiance += textureLod(u_TextureMaterialLightSphere, sphereCoords, 1.0).rgb * mdlEnvView.uIrradianceScale;
+    }
+
+    vec3 direct = v_LightColor.rgb * (diffuse + phase * cloudMat.uDiffuseScatterRatePow);
+    vec3 finalRGB = baseColor * (irradiance + direct);
+
+    gl_FragColor = vec4(finalRGB, alpha * modelInfo.model_alpha_mask);
 }
 `;
-}
+    }
 }

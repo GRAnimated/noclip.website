@@ -24,8 +24,6 @@ void main() {
     base_color.rgb *= scale;
     
     gl_FragColor = vec4(base_color.rgb, 1.0);
-    
-    gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(mdlEnvView.HDRTranslate_uHDRPower / mdlEnvView.HDRTranslate_uDynamicRange));
 }
 `;
 

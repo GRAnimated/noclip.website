@@ -156,7 +156,7 @@ function translateTextureFormat(format: GfxFormat): GPUTextureFormat {
         return 'r32uint';
     else if (format === GfxFormat.F32_R)
         return 'r32float';
-    else if (format === GfxFormat.F16_RGBA)
+    else if (format === GfxFormat.F16_RGBA || format === GfxFormat.F16_RGBA_RT)
         return 'rgba16float';
     else if (format === GfxFormat.F32_RGBA)
         return 'rgba32float';
@@ -445,7 +445,7 @@ function translateVertexFormat(format: GfxFormat): GPUVertexFormat {
         return 'uint16x4';
     else if (format === GfxFormat.F16_RG)
         return 'float16x2';
-    else if (format === GfxFormat.F16_RGBA)
+    else if (format === GfxFormat.F16_RGBA || format === GfxFormat.F16_RGBA_RT)
         return 'float16x4';
     else if (format === GfxFormat.F32_R)
         return 'float32';

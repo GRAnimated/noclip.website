@@ -636,6 +636,7 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
         case GfxFormat.F16_RGB:
             return WebGL2RenderingContext.RGB16F;
         case GfxFormat.F16_RGBA:
+        case GfxFormat.F16_RGBA_RT:
             return WebGL2RenderingContext.RGBA16F;
         case GfxFormat.F32_R:
             return WebGL2RenderingContext.R32F;
@@ -1527,6 +1528,8 @@ class GfxImplP_GL implements GfxSwapChain, GfxDevice {
         case GfxFormat.F32_RGB:
         case GfxFormat.F32_RGBA:
             return this._OES_texture_float_linear !== null;
+        case GfxFormat.F16_RGBA_RT:
+            return this._EXT_color_buffer_float !== null;
         case GfxFormat.F16_R:
         case GfxFormat.F16_RG:
         case GfxFormat.F16_RGB:

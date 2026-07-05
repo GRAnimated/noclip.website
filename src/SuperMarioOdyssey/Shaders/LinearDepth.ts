@@ -40,7 +40,8 @@ in vec2 vTexCoord;
 out vec4 oColor;
 
 float DepthToLinear(float depth, float near, float far) {
-    float z = depth * 2.0 - 1.0;
+    // noclip uses reversed depth
+    float z = 1.0 - depth * 2.0;
     float linear = (2.0 * near * far) / (far + near - z * (far - near));
     return (linear - near) / (far - near);
 }

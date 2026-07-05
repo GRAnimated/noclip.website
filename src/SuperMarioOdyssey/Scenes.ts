@@ -7,6 +7,8 @@ import * as SARC from '../fres_nx/sarc.js';
 import * as BFRES from '../fres_nx/bfres.js';
 import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
 import { BRTITextureHolder, BasicFRESRenderer, FMDLRenderer, FMDLData, SkyRenderer, latLonToDirection, TextureScopeKey } from './Render.js';
+import { LightMapParam, parseLightMapParam } from './LightMap.js';
+import { InitRippleParam, parseInitRippleParam } from './Ripple.js';
 import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { assert, assertExists } from '../util.js';
 import { mat4 } from 'gl-matrix';
@@ -17,13 +19,21 @@ import { CameraController } from '../Camera.js';
 
 const pathBase = `SuperMarioOdyssey`;
 const addon = `SuperMarioOdysseyMod`;
-const ENABLE_MODDED = true;
+const ENABLE_MODDED = false;
+
+function getSARCBaseName(name: string): string {
+    const slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+    return slash >= 0 ? name.slice(slash + 1) : name;
+}
 
 class ResourceSystem {
     public textureHolder = new BRTITextureHolder();
     public mounts = new Map<string, SARC.SARC>();
     public bfresCache = new Map<string, BFRES.FRES | null>();
     public fmdlDataCache = new Map<string, FMDLData | null>();
+    public materialLightCategoryCache = new Map<string, Map<string, string> | null>();
+    public initRippleParamCache = new Map<string, InitRippleParam | null>();
+    public lightMapList = new Map<string, LightMapParam>();
     public arcPromiseCache = new Map<string, Promise<SARC.SARC | null>>();
     private renderCache: GfxRenderCache;
 
@@ -34,6 +44,45 @@ class ResourceSystem {
     private loadResource(device: GfxDevice, dataFetcher: DataFetcher, mountName: string, sarc: SARC.SARC): void {
         assert(!this.mounts.has(mountName));
         this.mounts.set(mountName, sarc);
+
+        if (mountName === 'SystemData/LightMapList') {
+            this.lightMapList.clear();
+            for (const file of sarc.files) {
+                const baseName = getSARCBaseName(file.name);
+                if (!baseName.endsWith('.byml'))
+                    continue;
+                const key = baseName.slice(0, -'.byml'.length);
+                const parsed = BYML.parse(file.buffer) as any;
+                const param = parseLightMapParam(parsed, key);
+                this.lightMapList.set(key, param);
+                if (param.name !== key)
+                    this.lightMapList.set(param.name, param);
+            }
+            console.log('[SMO LightMapList]', { mountName, count: this.lightMapList.size, names: Array.from(this.lightMapList.keys()).slice(0, 80) });
+        }
+
+        const initMaterialLightFile = sarc.files.find((f) => getSARCBaseName(f.name) === 'InitMaterialLight.byml');
+        if (initMaterialLightFile) {
+            const parsed = BYML.parse(initMaterialLightFile.buffer) as any;
+            const initMaterialLight = (parsed?.root && typeof parsed.root === 'object') ? parsed.root : parsed;
+            const materialLightCategoryMap = new Map<string, string>();
+            for (const [key, value] of Object.entries(initMaterialLight)) {
+                if (typeof value === 'string')
+                    materialLightCategoryMap.set(key, value);
+            }
+            this.materialLightCategoryCache.set(mountName, materialLightCategoryMap);
+        } else {
+            this.materialLightCategoryCache.set(mountName, null);
+        }
+
+        const initRippleParamFile = sarc.files.find((f) => getSARCBaseName(f.name) === 'InitRippleParam.byml');
+        if (initRippleParamFile) {
+            const parsed = BYML.parse(initRippleParamFile.buffer) as any;
+            const initRippleParam = parseInitRippleParam(parsed);
+            this.initRippleParamCache.set(mountName, initRippleParam);
+        } else {
+            this.initRippleParamCache.set(mountName, null);
+        }
 
         const initModelFile = sarc.files.find((f) => f.name === 'InitModel.byml');
         if (initModelFile) {
@@ -98,10 +147,8 @@ class ResourceSystem {
     }
 
     public findFRES(mountName: string): BFRES.FRES | null {
-        if (!this.bfresCache.has(mountName)) {
-            console.log(`No FRES for ${mountName}`);
+        if (!this.bfresCache.has(mountName))
             this.bfresCache.set(mountName, null);
-        }
 
         return this.bfresCache.get(mountName)!;
     }
@@ -114,7 +161,7 @@ class ResourceSystem {
                 // TODO(jstpierre): Proper actor implementations...
                 if (fres.fmdl.length > 0) {
                     assert(fres.fmdl.length === 1);
-                    fmdlData = new FMDLData(this.renderCache, fres.fmdl[0]);
+                    fmdlData = new FMDLData(this.renderCache, fres.fmdl[0], this.materialLightCategoryCache.get(mountName) ?? null, this.initRippleParamCache.get(mountName) ?? null);
                 } else {
                     return null;
                 }
@@ -242,6 +289,12 @@ export class OdysseyRenderer extends BasicFRESRenderer {
         OdysseyRenderer.graphicsPreset = preset;
     }
 
+    public static lightMapList = new Map<string, LightMapParam>();
+
+    public setLightMapList(lightMapList: Map<string, LightMapParam>): void {
+        OdysseyRenderer.lightMapList = lightMapList;
+    }
+
     public adjustCameraController(c: CameraController) {
         c.setSceneMoveSpeedMult(1.5);
     }
@@ -271,6 +324,8 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
         
         const sceneRenderer = new OdysseyRenderer(device, resourceSystem);
         const cache = sceneRenderer.renderHelper.renderCache;
+
+        resourceSystem.fetchData(device, dataFetcher, `ObjectData/${world.Name}Texture`);
 
         const spawnZone = async (stageName: string, placement: mat4, isMap: boolean) => {
             console.log('Spawning stage:', stageName + (isMap ? ' (map)' : ''));
@@ -313,6 +368,8 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                 sceneRenderer.textureHolder.cubeMapSuffixName = suffixName;
 
                 const graphicsPresetSARC = await resourceSystem.fetchData(device, dataFetcher, `SystemData/GraphicsPreset`);
+                await resourceSystem.fetchData(device, dataFetcher, `SystemData/LightMapList`);
+                sceneRenderer.setLightMapList(resourceSystem.lightMapList);
                 console.log('Graphics Preset:', graphicsPresetSARC);
                 let graphicsPreset: GraphicsPreset | null = null;
                 for (let i = 0; i < graphicsPresetSARC!.files.length; i++) {
@@ -347,7 +404,7 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
 
                     const preset = OdysseyRenderer.graphicsPreset!;
                     const color = preset.DirectionalLight.Color;
-                    const lightColor = { r: color.R, g: color.G, b: color.B, a: color.A * 255.0 };
+                    const lightColor = { r: color.R, g: color.G, b: color.B, a: color.A };
 
                     resourceSystem.textureHolder.addLUTTexture(device, 16, lightColor);
                 }

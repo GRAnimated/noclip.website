@@ -59,10 +59,32 @@ function parseBRTI(buffer: ArrayBufferSlice, offs: number, littleEndian: boolean
         dataOffsTableIdx += 0x08;
     }
 
-    const mipBuffers: ArrayBufferSlice[] = [];
-    for (let i = 0; i < mipCount - 1; i++)
-        mipBuffers.push(buffer.slice(dataOffsets[i], dataOffsets[i + 1]));
-    mipBuffers.push(buffer.slice(dataOffsets[mipCount - 1], dataOffsets[0] + textureDataSize));
+    let mipBuffers: ArrayBufferSlice[] | ArrayBufferSlice[][];
+    if (arraySize > 1) {
+        // fix for every cubemap face being face 0:
+        // bntx stores array/cubemap textures as one mip chain per array layer
+        // the mip offset table points into layer 0
+        // subsequent layers are offset by the per-layer chain size
+
+        const layerSize = textureDataSize / arraySize;
+        const mipBufferArrays: ArrayBufferSlice[][] = [];
+        for (let mip = 0; mip < mipCount; mip++) {
+            const mipSize = mip < mipCount - 1 ? dataOffsets[mip + 1] - dataOffsets[mip] : layerSize - (dataOffsets[mip] - dataOffsets[0]);
+            const layers: ArrayBufferSlice[] = [];
+            for (let layer = 0; layer < arraySize; layer++) {
+                const layerBase = layer * layerSize;
+                layers.push(buffer.slice(layerBase + dataOffsets[mip], layerBase + dataOffsets[mip] + mipSize));
+            }
+            mipBufferArrays.push(layers);
+        }
+        mipBuffers = mipBufferArrays;
+    } else {
+        const mipBufferArray: ArrayBufferSlice[] = [];
+        for (let i = 0; i < mipCount - 1; i++)
+            mipBufferArray.push(buffer.slice(dataOffsets[i], dataOffsets[i + 1]));
+        mipBufferArray.push(buffer.slice(dataOffsets[mipCount - 1], dataOffsets[0] + textureDataSize));
+        mipBuffers = mipBufferArray;
+    }
 
     return { name, imageDimension, imageFormat, width, height, depth, arraySize, mipBuffers, blockHeightLog2 };
 }

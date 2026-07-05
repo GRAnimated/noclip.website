@@ -1,12 +1,12 @@
 import { vec4 } from 'gl-matrix';
 import { GfxBindingLayoutDescriptor, GfxSamplerFormatKind, GfxTextureDimension } from '../../gfx/platform/GfxPlatform.js';
 import { DeviceProgram } from '../../Program.js';
-import { GraphicsPreset, OdysseyRenderer, OdysseySceneDesc } from '../Scenes.js';
+import { GraphicsPreset } from '../Scenes.js';
 import { generateShaderUtil } from './ShaderUtil.js';
 
 export class HdrCompose extends DeviceProgram {
     public static ub_HdrComposeInfo = 0;
-    toneMapType: number = 8; // temp
+    toneMapType: number = 1;
 
     public static bindingLayouts: GfxBindingLayoutDescriptor[] = [
         {
@@ -21,7 +21,11 @@ export class HdrCompose extends DeviceProgram {
         return this.toneMapType.toString();
     }
 
-    public override both = generateShaderUtil() + `
+    public override both = `
+precision mediump float;
+precision mediump int;
+` + generateShaderUtil() + `
+
 layout(std140) uniform ub_HdrComposeInfo {
     vec4 uCameraMaskDiffuse;
     float uExposure;
@@ -37,6 +41,7 @@ layout(std140) uniform ub_HdrComposeInfo {
     vec2 uCameraIndirectTexScale;
     vec2 uCameraIndirect2TexScale;
     vec2 uColorCorrectionCoeff;
+    vec2 _padding0;
     vec3 uToneMapPowBase;
     float uToonShadeRate;
     vec3 uToonStep;
@@ -109,32 +114,32 @@ void main ( void )
 		tone_map_color.g = tone_map_color.g < 1.413 ? pow(tone_map_color.g * 0.38317, 1.0/2.2) : 1.0 - exp(-tone_map_color.g);
 		tone_map_color.b = tone_map_color.b < 1.413 ? pow(tone_map_color.b * 0.38317, 1.0/2.2) : 1.0 - exp(-tone_map_color.b);
 	}
-	else if (TONE_MAP_TYPE == 3) // Reinhard
+	else if (TONE_MAP_TYPE == 3) // Exposure Coef
+	{
+		tone_map_color = hdr_color.rgb + light_buf;
+		tone_map_color = 1.0 - exp(-uToneMapPowBase*tone_map_color);
+	}
+	else if (TONE_MAP_TYPE == 4) // Reinhard
 	{
 		tone_map_color = hdr_color.rgb + light_buf;
 		tone_map_color = tone_map_color / ( 1.0 + tone_map_color );
 	}
-	else if (TONE_MAP_TYPE == 4) // Filmic
+	else if (TONE_MAP_TYPE == 5) // Filmic
 	{
 		vec3 raw_color = hdr_color.rgb + light_buf;
 		tone_map_color = max( raw_color - 0.004, 0.0 );
 		vec3 tmp = raw_color * 6.2;
 		tone_map_color = ( raw_color * ( tmp + 0.5 ) ) / ( raw_color * ( tmp + 1.7 ) + 0.06 );
 	}
-	else if (TONE_MAP_TYPE == 5) // Filmic Param
-	{
-		vec3 raw_color = hdr_color.rgb + light_buf;
-		tone_map_color = ((raw_color*(uShoulderStrength*raw_color+uLinearAngle*uLinearStrength)+uToeStrength*uToeNumerator)/(raw_color*(uShoulderStrength*raw_color+uLinearStrength)+uToeStrength*uToeDenominator))-uToeNumerator/uToeDenominator;
-	}
 	else if (TONE_MAP_TYPE == 6) // Pow
 	{
 		tone_map_color = hdr_color.rgb + light_buf;
 		tone_map_color = 1.0 - pow(uToneMapPowBase, -tone_map_color);
 	}
-	else if (TONE_MAP_TYPE == 7) // Exposure Coef
+	else if (TONE_MAP_TYPE == 7) // Filmic Param
 	{
-		tone_map_color = hdr_color.rgb + light_buf;
-		tone_map_color = 1.0 - exp(-uToneMapPowBase*tone_map_color);
+		vec3 raw_color = hdr_color.rgb + light_buf;
+		tone_map_color = ((raw_color*(uShoulderStrength*raw_color+uLinearAngle*uLinearStrength)+uToeStrength*uToeNumerator)/(raw_color*(uShoulderStrength*raw_color+uLinearStrength)+uToeStrength*uToeDenominator))-uToeNumerator/uToeDenominator;
 	}
 	else if (TONE_MAP_TYPE == 8) // S-Curve
 	{
@@ -150,15 +155,6 @@ void main ( void )
 		tone_map_color.b = fract.x / fract.y;
 	}
 
-	// Color Correction
-
-	int COLOR_CORRECTION_TYPE = 1; // TODO: pass in as uniform
-	if (COLOR_CORRECTION_TYPE == 1)
-	{
-		vec3 xyz = tone_map_color * uColorCorrectionCoeff.x + uColorCorrectionCoeff.y;
-        // TODO: uColorCorrectionTable
-		// tone_map_color = texture(uColorCorrectionTable, xyz).rgb;
-	}
 
 	int USING_CARTOON = 0; // TODO: pass in as uniform
 	
@@ -181,7 +177,7 @@ void main ( void )
 		tone_map_color = mix(dark, tone_map_color, max(clamp01(rate), clamp01(1.0 - uToonShadeRate)));
 	}
 
-	oColor.rgb = tone_map_color;
+	oColor.rgb = pow(max(tone_map_color, vec3(0.0)), vec3(1.0 / 2.2));
 	oColor.a = hdr_color.a;
 }
 `;
@@ -191,80 +187,34 @@ type SCurveCoeffs = {
     shoulder: [number, number, number, number];
 };
 
-// Filmic Param from the shader
-function evalFilmicParam(x: number, S: number, Ls: number, La: number, T: number, Tn: number, Td: number): number {
-    const Nx = x * (S * x + La * Ls) + T * Tn;
-    const Dx = x * (S * x + Ls)     + T * Td;
-    if (Dx === 0.0) return 0.0;
-    return Nx / Dx - Tn / Td;
-}
-
-// Numeric derivative of Filmic Param at x
-function evalFilmicParamSlope(x: number, S: number, Ls: number, La: number, T: number, Tn: number, Td: number): number {
-    const h = Math.max(1e-3, x * 0.01);
-    const y1 = evalFilmicParam(x - h, S, Ls, La, T, Tn, Td);
-    const y2 = evalFilmicParam(x + h, S, Ls, La, T, Tn, Td);
-    return (y2 - y1) / (2 * h);
-}
-
-// Matches Filmic at 0, C, and W and tries to keep Filmic's slope at C
 function computeSCurveCoeffsFromPreset(hdr: GraphicsPreset['HdrCompose']): SCurveCoeffs {
-    const C  = hdr.CrossOver;
-    const T  = hdr.ToeStrength;
-    const S  = hdr.ShoulderStrength;
-    const Ls = hdr.LinearStrength;
-    const La = hdr.LinearAngle;
-    const Tn = hdr.ToeNumerator;
-    const Td = hdr.ToeDenominator;
+    const black = hdr.BlackPoint;
+    const cross = hdr.CrossOver;
+    const white = hdr.WhitePoint;
+    const toe = hdr.Toe;
+    const sholuder = hdr.Sholuder;
 
-    const y0     = evalFilmicParam(0.0, S, Ls, La, T, Tn, Td);
-    const yC     = evalFilmicParam(C,   S, Ls, La, T, Tn, Td);
-    const slopeC = evalFilmicParamSlope(C, S, Ls, La, T, Tn, Td);
+    const toeSpan = (cross - black) * (1.0 - toe);
+    const shoulderSpan = (white - cross) * (1.0 - sholuder);
+    const m = toeSpan / Math.max(toeSpan + shoulderSpan, 0.0001);
 
-    // White point
-    const W = C + 6.0;
-    const yW = evalFilmicParam(W, S, Ls, La, T, Tn, Td);
-
-    // Toe
-    const dToe = 1.0;
-    const bToe = 0.005 + T * 0.02; // small curvature to keep close to Filmic
-    const cToe = y0 * dToe;
-    const aToe = (yC * (bToe * C + dToe) - cToe) / C;
-
-    const toe: [number, number, number, number] = [
-        aToe,
-        bToe,
-        cToe,
-        dToe,
-    ];
-
-    // Shoulder
-    const dShoulder = 1.0;
-    const bShoulder = 0.005 + S * 0.005; // small curvature to keep close to Filmic
-
-    const C1 = yC * (bShoulder * C + dShoulder);
-    const C2 = yW * (bShoulder * W + dShoulder);
-
-    const det = C - W;
-    let aShoulder: number;
-    let cShoulder: number;
-
-    if (Math.abs(det) > 0.0001) {
-        aShoulder = (C1 - C2) / det;
-        cShoulder = C1 - aShoulder * C;
-    } else {
-        // continue with Filmic's slope at C
-        const slope = slopeC;
-        aShoulder = slope * dShoulder;
-        cShoulder = yC * dShoulder - aShoulder * C;
-    }
-
-    const shoulder: [number, number, number, number] = [aShoulder, bShoulder, cShoulder, dShoulder];
-
-    return { toe, shoulder };
+    return {
+        toe: [
+            (1.0 - toe) * m,
+            -toe,
+            -((1.0 - toe) * black * m),
+            cross - black * (1.0 - toe),
+        ],
+        shoulder: [
+            (1.0 - m) + sholuder * m,
+            sholuder,
+            (shoulderSpan * m) - cross * (1.0 - m),
+            shoulderSpan,
+        ],
+    };
 }
 
-export function fillHdrComposeUniforms(d: Float32Array, offs: number, preset: GraphicsPreset): number {
+export function fillHdrComposeUniforms(d: Float32Array, offs: number, preset: GraphicsPreset, exposureSliderValue: number = 1.0): number {
     const hdr = preset.HdrCompose;
 
     // uCameraMaskDiffuse (vec4)
@@ -273,10 +223,8 @@ export function fillHdrComposeUniforms(d: Float32Array, offs: number, preset: Gr
     d[offs++] = 0.0;
     d[offs++] = 0.0;
     
-    const EXPOSURE_SCALE = 4000.0;
-
-    // uExposure
-    d[offs++] = hdr.Exposure * EXPOSURE_SCALE;
+    // uExposure: preset's Exposure * camera debug slider value
+    d[offs++] = hdr.Exposure * exposureSliderValue;
     
     // uCameraMaskBase
     d[offs++] = 0.0;
@@ -320,9 +268,14 @@ export function fillHdrComposeUniforms(d: Float32Array, offs: number, preset: Gr
     // uCameraIndirect2TexScale (vec2)
     d[offs++] = 1.0;
     d[offs++] = 1.0;
-    
-    // uColorCorrectionCoeff (vec2)
-    d[offs++] = 1.0;
+
+    // uColorCorrectionCoeff (vec2), present in Nintendo's HdrCompose uniform.
+    // Keep it disabled; we do not run the AGL color-correction pass.
+    d[offs++] = 0.0;
+    d[offs++] = 0.0;
+
+    // padding before vec3 uToneMapPowBase
+    d[offs++] = 0.0;
     d[offs++] = 0.0;
     
     // uToneMapPowBase (vec3)
@@ -386,6 +339,5 @@ export function fillHdrComposeUniforms(d: Float32Array, offs: number, preset: Gr
     d[offs++] = 0.0;
     d[offs++] = 0.0;
     d[offs++] = 0.0;
-    
     return offs;
 }
