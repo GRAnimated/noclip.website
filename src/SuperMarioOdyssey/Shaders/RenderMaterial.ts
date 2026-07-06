@@ -367,7 +367,10 @@ vec2 GetScreenCoordinates()
 
 vec2 GetResolvedTextureCoordinates()
 {
-    return v_PerspDiv.xy * 0.5 + 0.5;
+    // vertex shader was causing distortion
+    // return v_PerspDiv.xy * 0.5 + 0.5;
+
+    return gl_FragCoord.xy * mdlEnvView.cScrSize.zw;
 }
 
 vec4 CalculateOutput(int flag)
@@ -1167,7 +1170,8 @@ void main() {
     vec3 view_normal = normalize(multMtx34Vec3(mdlEnvView.cView, v_Normal));
     v_SphereCoords = view_normal.xy * 0.5 + 0.5;
 
-    v_PerspDiv.xy = gl_Position.xy / gl_Position.w;
+    // moved to fragment shader due to distortion
+    // v_PerspDiv.xy = gl_Position.xy / gl_Position.w;
 
     vec3 T = normalize((UnpackMatrix(u_Model) * vec4(_t0.xyz, 0.0)).xyz);
     v_Tangents = vec4(T, 0.0);

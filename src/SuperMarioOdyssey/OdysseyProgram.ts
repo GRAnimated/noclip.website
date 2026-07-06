@@ -44,7 +44,9 @@ layout(std140) uniform ub_MdlEnvView {
 
     // TODO: Nintendo's MdlEnvView has extra fields here
     float cGlobalLodBias;
-    vec3 _paddingAaaa;
+    float _paddingAaaa0;
+    float _paddingAaaa1;
+    float _paddingAaaa2;
 
     // Fog here since we're short on uniform blocks
     vec4 cFogColor;         // .rgb = color, .a = slope

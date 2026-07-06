@@ -320,12 +320,17 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                         return worldList[i];
             return null;
         }
-        const world = assertExists(findWorldFromStage(worldList, this.id));
-        
+        const world = findWorldFromStage(worldList, this.id);
+        if (world === null) {
+            console.warn(`stage "${this.id}" not found in WorldListFromDb.byml, loading with default scenario`);
+        }
+
         const sceneRenderer = new OdysseyRenderer(device, resourceSystem);
         const cache = sceneRenderer.renderHelper.renderCache;
 
-        resourceSystem.fetchData(device, dataFetcher, `ObjectData/${world.Name}Texture`);
+        if (world !== null) {
+            resourceSystem.fetchData(device, dataFetcher, `ObjectData/${world.Name}Texture`);
+        }
 
         const spawnZone = async (stageName: string, placement: mat4, isMap: boolean) => {
             console.log('Spawning stage:', stageName + (isMap ? ' (map)' : ''));
@@ -338,7 +343,7 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                 const maxIndex = stageMap.length > 0 ? stageMap.length - 1 : 0;
                 scenarioIndex = Math.max(0, Math.min(this.scenarioIndex, maxIndex));
             } else {
-                const scenarioNum = world.AfterEndingScenario;
+                const scenarioNum = world !== null ? world.AfterEndingScenario : 0;
                 // It seems like the scenarios are 1-indexed, and 0 means "default" (which appears to be 1).
                 scenarioIndex = scenarioNum > 0 ? scenarioNum - 1 : 0;
                 const maxIndex = stageMap.length > 0 ? stageMap.length - 1 : 0;
@@ -352,10 +357,23 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
 
                 console.log(scenarioIndex);
 
-                let stageDesignParam = stageDesign.GraphicsAreaParamArray[scenarioIndex - 1];
-                
-                if (stageDesignParam.AreaName === "") {
-                    stageDesignParam = stageDesign.GraphicsAreaParamArray[0];
+                // Vanilla stages store their per-scenario entry as
+                // AreaName="DefaultArea" + SuffixName="Scenario<N>"
+                // The default (scenario 1) uses SuffixName="".
+                // Modded stages often don't follow that convention at all,
+                // so fall back to the first entry with a non-empty PresetName.
+                let stageDesignParam = stageDesign.GraphicsAreaParamArray.find(
+                    (e) => e.AreaName === "DefaultArea" && e.SuffixName === `Scenario${scenarioIndex + 1}`);
+                if (!stageDesignParam)
+                    stageDesignParam = stageDesign.GraphicsAreaParamArray.find(
+                        (e) => e.AreaName === "DefaultArea" && e.SuffixName === "");
+                if (!stageDesignParam)
+                    stageDesignParam = stageDesign.GraphicsAreaParamArray.find(
+                        (e) => e.PresetName !== "");
+
+                if (!stageDesignParam) {
+                    console.warn(`No usable GraphicsAreaParam for stage "${stageName}" scenario ${scenarioIndex}; skipping preset`);
+                    return;
                 }
 
                 console.log('Stage Design:', stageDesign);
@@ -776,6 +794,35 @@ const sceneDescs = [
     new OdysseySceneDesc("Special2WorldKoopaStage", "Darker Side Bowser Area"),
     new OdysseySceneDesc("Special2WorldLavaStage", "Darker Side Course Area"),
     new OdysseySceneDesc("Special2WorldCloudStage", "Darker Side Cloud Area"),
+
+    "Cap / Cascade / Global Internals",
+    new OdysseySceneDesc("DemoMeetCapNpcSubStage", "DemoMeetCapNpcSubStage", 0),
+    new OdysseySceneDesc("DemoOpeningStage", "DemoOpeningStage", 0),
+    new OdysseySceneDesc("DemoStartWorldWaterfallStage", "DemoStartWorldWaterfallStage", 0),
+    new OdysseySceneDesc("HomeShipInsideStage", "HomeShipInsideStage", 0),
+    new OdysseySceneDesc("WorldMapStage", "WorldMapStage", 0),
+
+    "Demo / Transition Stages",
+    new OdysseySceneDesc("DemoBossRaidAttackStage", "DemoBossRaidAttackStage", 0),
+    new OdysseySceneDesc("DemoChangeWorldBossRaidAttackStage", "DemoChangeWorldBossRaidAttackStage", 0),
+    new OdysseySceneDesc("DemoChangeWorldFindKoopaShipStage", "DemoChangeWorldFindKoopaShipStage", 0),
+    new OdysseySceneDesc("DemoChangeWorldStage", "DemoChangeWorldStage", 0),
+    new OdysseySceneDesc("DemoCrashHomeFallStage", "DemoCrashHomeFallStage", 0),
+    new OdysseySceneDesc("DemoCrashHomeStage", "DemoCrashHomeStage", 0),
+    new OdysseySceneDesc("DemoEndingStage", "DemoEndingStage", 0),
+    new OdysseySceneDesc("DemoHackFirstStage", "DemoHackFirstStage", 0),
+    new OdysseySceneDesc("DemoHackKoopaStage", "DemoHackKoopaStage", 0),
+    new OdysseySceneDesc("DemoTakeOffKoopaForMoonStage", "DemoTakeOffKoopaForMoonStage", 0),
+    new OdysseySceneDesc("DemoWorldMoveBackwardArriveStage", "DemoWorldMoveBackwardArriveStage", 0),
+    new OdysseySceneDesc("DemoWorldMoveBackwardStage", "DemoWorldMoveBackwardStage", 0),
+    new OdysseySceneDesc("DemoWorldMoveForwardArriveStage", "DemoWorldMoveForwardArriveStage", 0),
+    new OdysseySceneDesc("DemoWorldMoveForwardFirstStage", "DemoWorldMoveForwardFirstStage", 0),
+    new OdysseySceneDesc("DemoWorldMoveForwardStage", "DemoWorldMoveForwardStage", 0),
+    new OdysseySceneDesc("DemoWorldMoveMoonBackwardStage", "DemoWorldMoveMoonBackwardStage", 0),
+    new OdysseySceneDesc("DemoWorldMoveMoonForwardFirstStage", "DemoWorldMoveMoonForwardFirstStage", 0),
+    new OdysseySceneDesc("DemoWorldMoveMoonForwardStage", "DemoWorldMoveMoonForwardStage", 0),
+    new OdysseySceneDesc("DemoWorldWarpHoleStage", "DemoWorldWarpHoleStage", 0),
+    new OdysseySceneDesc("StaffRollMoonRockDemo", "StaffRollMoonRockDemo", 0),
 
     "Duplicates",
     new OdysseySceneDesc("MoonWorldKoopa2Stage", "Captured Bowser Stage Background Duplicate"),
