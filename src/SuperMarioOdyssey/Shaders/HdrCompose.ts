@@ -1,7 +1,7 @@
 import { vec4 } from 'gl-matrix';
 import { GfxBindingLayoutDescriptor, GfxSamplerFormatKind, GfxTextureDimension } from '../../gfx/platform/GfxPlatform.js';
 import { DeviceProgram } from '../../Program.js';
-import { GraphicsPreset } from '../Scenes.js';
+import { GraphicsPreset } from '../Scenes_SuperMarioOdyssey.js';
 import { generateShaderUtil } from './ShaderUtil.js';
 
 export class HdrCompose extends DeviceProgram {

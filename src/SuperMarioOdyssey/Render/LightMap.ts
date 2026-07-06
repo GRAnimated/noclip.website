@@ -1,4 +1,4 @@
-import { clamp } from '../MathHelpers.js';
+import { clamp } from '../../MathHelpers.js';
 
 // TODO: this is slop and still needs to be reviewed and could be moved to the GPU
 
