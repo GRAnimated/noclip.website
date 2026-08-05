@@ -21,10 +21,7 @@ export class HdrCompose extends DeviceProgram {
         return this.toneMapType.toString();
     }
 
-    public override both = `
-precision mediump float;
-precision mediump int;
-` + generateShaderUtil() + `
+    public override both = generateShaderUtil() + `
 
 layout(std140) uniform ub_HdrComposeInfo {
     vec4 uCameraMaskDiffuse;

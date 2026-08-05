@@ -59,7 +59,10 @@ layout(std140) uniform ub_MdlEnvView {
     vec3 cViewAxisY;
     float _padding5;
     vec3 cViewAxisZ;
-    float _padding6;
+    float cIsDeferredFog; // 1.0 when RenderFog fullscreen pass is active, else 0.0;
+                          // per-material path skips CalculateFog when this is set,
+                          // so the fog isn't applied twice because the fullscreen pass
+                          // does the sky-tinted blend.
 } mdlEnvView;
 `;
 

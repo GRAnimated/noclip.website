@@ -6,12 +6,12 @@ import { DataFetcher } from '../DataFetcher.js';
 import * as SARC from '../fres_nx/sarc.js';
 import * as BFRES from '../fres_nx/bfres.js';
 import { GfxDevice } from '../gfx/platform/GfxPlatform.js';
-import { BRTITextureHolder, BasicFRESRenderer, FMDLRenderer, FMDLData, SkyRenderer, latLonToDirection, TextureScopeKey } from './Main.js';
+import { BRTITextureHolder, ViewRenderer, FMDLRenderer, FMDLData, SkyRenderer, TextureScopeKey, GraphicsQualityParam, GpuPerfAreaParam, GpuPerfAreaVolume, ClippingFarAreaVolume } from './Main.js';
 import { LightMapParam, parseLightMapParam } from './Render/LightMap.js';
 import { InitRippleParam, parseInitRippleParam } from './Render/Ripple.js';
 import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { assert, assertExists } from '../util.js';
-import { mat4 } from 'gl-matrix';
+import { mat4, vec3 } from 'gl-matrix';
 import { SceneContext } from '../SceneBase.js';
 import { computeModelMatrixSRT, MathConstants } from '../MathHelpers.js';
 import { GfxRenderCache } from '../gfx/render/GfxRenderCache.js';
@@ -33,7 +33,11 @@ class ResourceSystem {
     public fmdlDataCache = new Map<string, FMDLData | null>();
     public materialLightCategoryCache = new Map<string, Map<string, string> | null>();
     public initRippleParamCache = new Map<string, InitRippleParam | null>();
+    public initLodParamCache = new Map<string, any | null>();
     public lightMapList = new Map<string, LightMapParam>();
+    public projectGraphicsQuality: GraphicsQualityParam | null = null;
+    public stageGraphicsQualityCache = new Map<string, GraphicsQualityParam | null>();
+    public gpuPerfAreaParamCache = new Map<string, Map<string, GpuPerfAreaParam>>();
     public arcPromiseCache = new Map<string, Promise<SARC.SARC | null>>();
     private renderCache: GfxRenderCache;
 
@@ -61,6 +65,39 @@ class ResourceSystem {
             console.log('[SMO LightMapList]', { mountName, count: this.lightMapList.size, names: Array.from(this.lightMapList.keys()).slice(0, 80) });
         }
 
+        if (mountName === 'SystemData/ProjectGraphicsQuality') {
+            const file = sarc.files.find((f) => getSARCBaseName(f.name) === 'ProjectGraphicsQuality.byml');
+            if (file !== undefined) {
+                const parsed = BYML.parse(file.buffer) as any;
+                const params = parsed.ProjectGraphicsQualityParamArray as GraphicsQualityParam[] | undefined;
+                // Match the normal docked project preset by default
+                this.projectGraphicsQuality = params?.find((p) => p.Name === 'Console' && p.ParamType === 0 && p.Rank === 0) ?? params?.[0] ?? null;
+            }
+        }
+
+        const graphicsQualityFile = sarc.files.find((f) => getSARCBaseName(f.name) === 'GraphicsQuality.byml');
+        if (graphicsQualityFile !== undefined) {
+            const parsed = BYML.parse(graphicsQualityFile.buffer) as any;
+            const params = parsed.GraphicsQualityParamArray as GraphicsQualityParam[] | undefined;
+            // Stage GraphicsQuality files normally have one stage-quality entry; if
+            // they include platform-specific entries, prefer the normal Console one.
+            this.stageGraphicsQualityCache.set(mountName, params?.find((p) => p.Name === 'Console' && p.ParamType === 0 && p.Rank === 0) ?? params?.[0] ?? null);
+        } else {
+            this.stageGraphicsQualityCache.set(mountName, null);
+        }
+
+        const gpuPerfAreaFile = sarc.files.find((f) => getSARCBaseName(f.name) === 'GpuPerfArea.byml');
+        const gpuPerfAreaParams = new Map<string, GpuPerfAreaParam>();
+        if (gpuPerfAreaFile !== undefined) {
+            const parsed = BYML.parse(gpuPerfAreaFile.buffer) as any;
+            const params = parsed.GpuPerfAreaParamArray as GpuPerfAreaParam[] | undefined;
+            for (const param of params ?? []) {
+                if (param.AreaName)
+                    gpuPerfAreaParams.set(param.AreaName, param);
+            }
+        }
+        this.gpuPerfAreaParamCache.set(mountName, gpuPerfAreaParams);
+
         const initMaterialLightFile = sarc.files.find((f) => getSARCBaseName(f.name) === 'InitMaterialLight.byml');
         if (initMaterialLightFile) {
             const parsed = BYML.parse(initMaterialLightFile.buffer) as any;
@@ -84,10 +121,14 @@ class ResourceSystem {
             this.initRippleParamCache.set(mountName, null);
         }
 
+        const initLodFile = sarc.files.find((f) => getSARCBaseName(f.name) === 'InitLod.byml');
+        this.initLodParamCache.set(mountName, initLodFile ? BYML.parse(initLodFile.buffer) as any : null);
+
         const initModelFile = sarc.files.find((f) => f.name === 'InitModel.byml');
         if (initModelFile) {
             const initModel = BYML.parse(initModelFile.buffer) as any;
             const textureArc: string = initModel.TextureArc;
+            // console.log("Object archive", mountName, "is requesting texture arc", textureArc);
             if (textureArc && !this.arcPromiseCache.has(`ObjectData/${textureArc}`)) {
                 this.fetchData(device, dataFetcher, `ObjectData/${textureArc}`);
             }
@@ -137,13 +178,18 @@ class ResourceSystem {
         return this.arcPromiseCache.get(arcPath)!;
     }
 
-    public waitForLoad(): Promise<void> {
-        return Promise.all([
-            ...this.arcPromiseCache.values(),
-            ...this.textureHolder.pendingUploads,
-        ]).then(() => {
-            this.textureHolder.pendingUploads.length = 0;
-        }) as unknown as Promise<void>;
+    public async waitForLoad(): Promise<void> {
+        while (true) {
+            const arcPromises = [...this.arcPromiseCache.values()];
+            const uploadPromises = [...this.textureHolder.pendingUploads];
+
+            await Promise.all([...arcPromises, ...uploadPromises]);
+
+            if (this.arcPromiseCache.size === arcPromises.length && this.textureHolder.pendingUploads.length === uploadPromises.length) {
+                this.textureHolder.pendingUploads.length = 0;
+                return;
+            }
+        }
     }
 
     public findFRES(mountName: string): BFRES.FRES | null {
@@ -161,7 +207,7 @@ class ResourceSystem {
                 // TODO(jstpierre): Proper actor implementations...
                 if (fres.fmdl.length > 0) {
                     assert(fres.fmdl.length === 1);
-                    fmdlData = new FMDLData(this.renderCache, fres.fmdl[0], this.materialLightCategoryCache.get(mountName) ?? null, this.initRippleParamCache.get(mountName) ?? null);
+                    fmdlData = new FMDLData(this.renderCache, fres.fmdl[0], this.materialLightCategoryCache.get(mountName) ?? null, this.initRippleParamCache.get(mountName) ?? null, this.initLodParamCache.get(mountName) ?? null);
                 } else {
                     return null;
                 }
@@ -190,11 +236,13 @@ class ResourceSystem {
 type StageMap = { ObjectList?: StageObject[], ZoneList?: StageObject[], SkyList?: StageObject[] }[];
 type Vector = { X: number, Y: number, Z: number };
 type StageObject = {
+    Id?: string,
     UnitConfigName: string,
     UnitConfig: UnitConfig,
     Rotate: Vector,
     Scale: Vector,
     Translate: Vector,
+    Priority?: number,
 };
 type UnitConfig = {
     DisplayName: string,
@@ -205,6 +253,35 @@ type UnitConfig = {
     ParameterConfigName: string,
     PlacementTargetFile: string,
 };
+
+function getStageObjectArgNumber(obj: StageObject, name: string): number | undefined {
+    const anyObj = obj as any;
+    const direct = anyObj[name];
+    if (typeof direct === 'number')
+        return direct;
+
+    for (const containerName of ['Args', 'Arg', 'AreaObjArg', 'Parameter', 'Parameters']) {
+        const container = anyObj[containerName];
+        if (container === undefined || container === null)
+            continue;
+        if (typeof container === 'object' && !Array.isArray(container)) {
+            const value = container[name];
+            if (typeof value === 'number')
+                return value;
+        } else if (Array.isArray(container)) {
+            for (const entry of container) {
+                const key = entry?.Key ?? entry?.Name ?? entry?.ParamName;
+                if (key !== name)
+                    continue;
+                const value = entry.Value ?? entry.Data ?? entry.Number;
+                if (typeof value === 'number')
+                    return value;
+            }
+        }
+    }
+
+    return undefined;
+}
 type GraphicsAreaParamEntry = {
     AreaName: string;
     CubeMapUnitName: string;
@@ -220,7 +297,7 @@ export type GraphicsPreset = {
         Color: { A: number; B: number; G: number; R: number };
         DirectionParam: { X: number; Y: number; };
     }
-    Sky: { Name: string };
+    Sky: { Name: string; Rotate?: Vector; StarIntensity?: number };
     Fog: {
         Color: { R: number; G: number; B: number; A: number };
         Slope: number;
@@ -273,7 +350,7 @@ function calcModelMtxFromTRSVectors(dst: mat4, tv: Vector, rv: Vector, sv: Vecto
         tv.X, tv.Y, tv.Z);
 }
 
-export class OdysseyRenderer extends BasicFRESRenderer {
+export class OdysseyRenderer extends ViewRenderer {
     public static graphicsPreset: GraphicsPreset | null = null;
 
     constructor(device: GfxDevice, private resourceSystem: ResourceSystem) {
@@ -301,7 +378,16 @@ export class OdysseyRenderer extends BasicFRESRenderer {
 }
 
 export class OdysseySceneDesc implements Viewer.SceneDesc {
-    constructor(public id: string, public name: string = id, public scenarioIndex: number = 1) {
+    constructor(public id: string, public name: string = id, public scenarioNo: number | null = 1) {
+    }
+
+    public serializeSceneDescState(): string | null {
+        return this.scenarioNo !== null ? `ScenarioNo=${this.scenarioNo}` : null;
+    }
+
+    public matchesSceneDescState(state: string): boolean {
+        const match = /(?:^|;)ScenarioNo=(-?\d+)(?:;|$)/.exec(state);
+        return match !== null && Number(match[1]) === this.scenarioNo;
     }
 
     public async createScene(device: GfxDevice, context: SceneContext): Promise<Viewer.SceneGfx> {
@@ -309,6 +395,7 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
         const dataFetcher = context.dataFetcher;
 
         const worldListSARC = assertExists(await resourceSystem.fetchData(device, dataFetcher, `SystemData/WorldList`));
+        await resourceSystem.fetchData(device, dataFetcher, `SystemData/ProjectGraphicsQuality`);
         type WorldListFromDb = { Name: string, StageList: [{ category: string, name: string }], WorldName: string, ScenarioNum: number, ClearMainScenario: number, AfterEndingScenario: number, MoonRockScenario: number };
         const worldList: WorldListFromDb[] = BYML.parse(worldListSARC.files.find((f) => f.name === 'WorldListFromDb.byml')!.buffer);
 
@@ -326,6 +413,8 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
         }
 
         const sceneRenderer = new OdysseyRenderer(device, resourceSystem);
+        if (resourceSystem.projectGraphicsQuality !== null)
+            sceneRenderer.graphicsQualityInfo.applyProjectParam(resourceSystem.projectGraphicsQuality);
         const cache = sceneRenderer.renderHelper.renderCache;
 
         if (world !== null) {
@@ -339,9 +428,9 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
             const stageMap: StageMap = BYML.parse(assertExists(stageMapData.files.find((n) => n.name === `${stageName}Map.byml`)).buffer);
 
             let scenarioIndex: number;
-            if (this.scenarioIndex !== null && !Number.isNaN(this.scenarioIndex)) {
+            if (this.scenarioNo !== null && !Number.isNaN(this.scenarioNo)) {
                 const maxIndex = stageMap.length > 0 ? stageMap.length - 1 : 0;
-                scenarioIndex = Math.max(0, Math.min(this.scenarioIndex, maxIndex));
+                scenarioIndex = Math.max(0, Math.min(this.scenarioNo - 1, maxIndex));
             } else {
                 const scenarioNum = world !== null ? world.AfterEndingScenario : 0;
                 // It seems like the scenarios are 1-indexed, and 0 means "default" (which appears to be 1).
@@ -352,7 +441,49 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
             const entry = stageMap[scenarioIndex];
 
             if (isMap) {
-                const stageDesignData = assertExists(await resourceSystem.fetchData(device, dataFetcher, `StageData/${stageName}Design`));
+                const stageDesignMountName = `StageData/${stageName}Design`;
+                const stageDesignData = assertExists(await resourceSystem.fetchData(device, dataFetcher, stageDesignMountName));
+                const stageQualityParam = resourceSystem.stageGraphicsQualityCache.get(stageDesignMountName);
+                if (stageQualityParam !== null && stageQualityParam !== undefined)
+                    sceneRenderer.graphicsQualityInfo.applyStageParam(stageQualityParam);
+
+                const gpuPerfAreaParams = resourceSystem.gpuPerfAreaParamCache.get(stageDesignMountName) ?? new Map<string, GpuPerfAreaParam>();
+                const stageDesignPlacementFile = stageDesignData.files.find((n) => n.name === `${stageName}Design.byml`);
+                if (stageDesignPlacementFile !== undefined) {
+                    const stageDesignPlacement = BYML.parse(stageDesignPlacementFile.buffer) as { AreaList?: StageObject[] }[];
+                    const designEntry = stageDesignPlacement[Math.min(scenarioIndex, stageDesignPlacement.length - 1)];
+                    for (const area of designEntry?.AreaList ?? []) {
+                        const translate = vec3.fromValues(area.Translate.X, area.Translate.Y, area.Translate.Z);
+                        const rotate = vec3.fromValues(area.Rotate.X, area.Rotate.Y, area.Rotate.Z);
+                        const scale = vec3.fromValues(area.Scale.X, area.Scale.Y, area.Scale.Z);
+                        const priority = area.Priority ?? 0;
+
+                        if (area.UnitConfigName === 'GpuPerfArea' && area.Id !== undefined) {
+                            const param = gpuPerfAreaParams.get(area.Id);
+                            if (param !== undefined) {
+                                sceneRenderer.gpuPerfAreaVolumes.push(new GpuPerfAreaVolume(
+                                    param,
+                                    placement,
+                                    translate,
+                                    rotate,
+                                    scale,
+                                    priority,
+                                ));
+                            }
+                        } else if (area.UnitConfigName === 'ClippingFarArea') {
+                            sceneRenderer.clippingFarAreaVolumes.push(new ClippingFarAreaVolume(
+                                getStageObjectArgNumber(area, 'FarClipDistance') ?? 7000.0,
+                                getStageObjectArgNumber(area, 'FarClipDistanceSub') ?? 4000.0,
+                                placement,
+                                translate,
+                                rotate,
+                                scale,
+                                priority,
+                            ));
+                        }
+                    }
+                }
+
                 const stageDesign: GraphicsArea = BYML.parse(assertExists(stageDesignData.files.find((n) => n.name === `GraphicsArea.byml`)).buffer);
 
                 console.log(scenarioIndex);
@@ -388,7 +519,6 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                 const graphicsPresetSARC = await resourceSystem.fetchData(device, dataFetcher, `SystemData/GraphicsPreset`);
                 await resourceSystem.fetchData(device, dataFetcher, `SystemData/LightMapList`);
                 sceneRenderer.setLightMapList(resourceSystem.lightMapList);
-                console.log('Graphics Preset:', graphicsPresetSARC);
                 let graphicsPreset: GraphicsPreset | null = null;
                 for (let i = 0; i < graphicsPresetSARC!.files.length; i++) {
                     const file = graphicsPresetSARC!.files[i];
@@ -399,7 +529,7 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                     }
                 }
 
-                console.log(graphicsPreset);
+                console.log("Graphics Preset:", graphicsPreset);
 
                 if (graphicsPreset) {
                     const skyLocation = `ObjectData/${graphicsPreset.Sky.Name}`;
@@ -411,11 +541,9 @@ export class OdysseySceneDesc implements Viewer.SceneDesc {
                     const skyFmdlData = resourceSystem.getFMDLData(device, skyLocation);
                     if (skyFmdlData !== null) {
                         const skyRenderer = new SkyRenderer(device, cache, resourceSystem.textureHolder, skyFmdlData, graphicsPreset.Sky.Name);
-                        mat4.copy(skyRenderer.modelMatrix, placement);
-                        
-                        const preset = OdysseyRenderer.graphicsPreset!;
-                        const dir = latLonToDirection(preset.DirectionalLight.DirectionParam.Y, preset.DirectionalLight.DirectionParam.X);
-                        mat4.rotateY(skyRenderer.modelMatrix, skyRenderer.modelMatrix, (180 * MathConstants.DEG_TO_RAD) + dir.z);
+                        const skyRotate = graphicsPreset.Sky.Rotate ?? { X: 0, Y: 0, Z: 0 };
+                        calcModelMtxFromTRSVectors(skyRenderer.modelMatrix, { X: 0, Y: 0, Z: 0 }, skyRotate, { X: 1, Y: 1, Z: 1 });
+                        mat4.mul(skyRenderer.modelMatrix, placement, skyRenderer.modelMatrix);
                         
                         sceneRenderer.skyRenderers.push(skyRenderer);
                     }

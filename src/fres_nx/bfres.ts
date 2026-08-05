@@ -6,11 +6,29 @@ import { AABB } from "../Geometry.js";
 import { vec2, vec3, vec4 } from "gl-matrix";
 import { Color } from "../Color.js";
 
+export enum FSKL_BoneRotationMode {
+    Quat,
+    EulerXyz,
+}
+
 export interface FSKL_Bone {
     name: string;
+    index: number;
+    parentIndex: number;
+    smoothMtxIndex: number;
+    rigidMtxIndex: number;
+    billboardIndex: number;
+    flags: number;
+    rotationMode: FSKL_BoneRotationMode;
+    scale: vec3;
+    rotation: vec4;
+    translation: vec3;
 }
 
 export interface FSKL {
+    flags: number;
+    smoothMtxCount: number;
+    rigidMtxCount: number;
     bones: FSKL_Bone[];
 }
 
@@ -163,33 +181,34 @@ function parseFSKL(buffer: ArrayBufferSlice, offs: number, littleEndian: boolean
     for (let i = 0; i < boneCount; i++) {
         const name = readBinStr(buffer, view.getUint32(boneArrayIdx + 0x00, littleEndian), littleEndian);
         const index = view.getUint16(boneArrayIdx + 0x28, littleEndian);
-        const parentIndex = view.getUint16(boneArrayIdx + 0x2A, littleEndian);
+        const parentIndex = view.getInt16(boneArrayIdx + 0x2A, littleEndian);
         const smoothMtxIndex = view.getInt16(boneArrayIdx + 0x2C, littleEndian);
         const rigidMtxIndex = view.getInt16(boneArrayIdx + 0x2E, littleEndian);
         const billboardIndex = view.getUint16(boneArrayIdx + 0x30, littleEndian);
         const boneFlag: BoneFlag = view.getUint32(boneArrayIdx + 0x34, littleEndian);
 
-        const scaleX = view.getFloat32(boneArrayIdx + 0x38, littleEndian);
-        const scaleY = view.getFloat32(boneArrayIdx + 0x3C, littleEndian);
-        const scaleZ = view.getFloat32(boneArrayIdx + 0x40, littleEndian);
-        if ((boneFlag & BoneFlag.RotationMode_EulerXyz)) {
-            const rotationEulerX = view.getFloat32(boneArrayIdx + 0x44, littleEndian);
-            const rotationEulerY = view.getFloat32(boneArrayIdx + 0x48, littleEndian);
-            const rotationEulerZ = view.getFloat32(boneArrayIdx + 0x4C, littleEndian);
-        } else {
-            const rotationQuatX = view.getFloat32(boneArrayIdx + 0x44, littleEndian);
-            const rotationQuatY = view.getFloat32(boneArrayIdx + 0x48, littleEndian);
-            const rotationQuatZ = view.getFloat32(boneArrayIdx + 0x4C, littleEndian);
-            const rotationQuatW = view.getFloat32(boneArrayIdx + 0x50, littleEndian);
-        }
-        const translationX = view.getFloat32(boneArrayIdx + 0x54, littleEndian);
-        const translationY = view.getFloat32(boneArrayIdx + 0x58, littleEndian);
-        const translationZ = view.getFloat32(boneArrayIdx + 0x5C, littleEndian);
+        const scale = vec3.fromValues(
+            view.getFloat32(boneArrayIdx + 0x38, littleEndian),
+            view.getFloat32(boneArrayIdx + 0x3C, littleEndian),
+            view.getFloat32(boneArrayIdx + 0x40, littleEndian),
+        );
+        const rotation = vec4.fromValues(
+            view.getFloat32(boneArrayIdx + 0x44, littleEndian),
+            view.getFloat32(boneArrayIdx + 0x48, littleEndian),
+            view.getFloat32(boneArrayIdx + 0x4C, littleEndian),
+            view.getFloat32(boneArrayIdx + 0x50, littleEndian),
+        );
+        const translation = vec3.fromValues(
+            view.getFloat32(boneArrayIdx + 0x54, littleEndian),
+            view.getFloat32(boneArrayIdx + 0x58, littleEndian),
+            view.getFloat32(boneArrayIdx + 0x5C, littleEndian),
+        );
+        const rotationMode = (boneFlag & BoneFlag.RotationMode_EulerXyz) ? FSKL_BoneRotationMode.EulerXyz : FSKL_BoneRotationMode.Quat;
 
-        bones.push({ name });
+        bones.push({ name, index, parentIndex, smoothMtxIndex, rigidMtxIndex, billboardIndex, flags: boneFlag, rotationMode, scale, rotation, translation });
         boneArrayIdx += 0x60;
     }
-    return { bones };
+    return { flags: flag, smoothMtxCount, rigidMtxCount, bones };
 }
 
 function parseFVTX(buffer: ArrayBufferSlice, memoryPoolBuffer: ArrayBufferSlice, offs: number, littleEndian: boolean): FVTX {

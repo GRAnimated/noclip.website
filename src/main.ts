@@ -254,7 +254,7 @@ enum SaveStatesAction {
 class SceneDatabase {
     private sceneDescToGroup = new Map<SceneDesc, SceneGroup>();
     private sceneDescToId = new Map<SceneDesc, string>();
-    private idToSceneDesc = new Map<string, SceneDesc>();
+    private idToSceneDesc = new Map<string, SceneDesc[]>();
 
     public onchanged: (() => void) | null = null;
 
@@ -271,8 +271,8 @@ class SceneDatabase {
                 for (const [altSceneId, sceneId] of sceneGroup.sceneIdMap) {
                     const altSceneDescId = `${sceneGroup.id}/${altSceneId}`;
                     const sceneDescId = `${sceneGroup.id}/${sceneId}`;
-                    const sceneDesc = assertExists(this.idToSceneDesc.get(sceneDescId));
-                    this.idToSceneDesc.set(altSceneDescId, sceneDesc);
+                    const sceneDescs = assertExists(this.idToSceneDesc.get(sceneDescId));
+                    this.idToSceneDesc.set(altSceneDescId, sceneDescs);
                 }
             }
         }
@@ -290,8 +290,18 @@ class SceneDatabase {
         return this.sceneDescToGroup.get(sceneDesc)!;
     }
 
-    public getSceneDescForId(sceneDescId: string): SceneDesc | null {
-        return this.idToSceneDesc.get(sceneDescId) ?? null;
+    public getSceneDescForId(sceneDescId: string, sceneDescState: string = ''): SceneDesc | null {
+        const sceneDescs = this.idToSceneDesc.get(sceneDescId);
+        if (sceneDescs === undefined)
+            return null;
+
+        if (sceneDescState !== '') {
+            const matchedSceneDesc = sceneDescs.find((sceneDesc) => sceneDesc.matchesSceneDescState?.(sceneDescState));
+            if (matchedSceneDesc !== undefined)
+                return matchedSceneDesc;
+        }
+
+        return sceneDescs[sceneDescs.length - 1];
     }
 
     public addSceneDesc(sceneGroup: SceneGroup, sceneDesc: SceneDesc): void {
@@ -299,7 +309,10 @@ class SceneDatabase {
         const id = this._makeSceneDescId(sceneGroup, sceneDesc);
         this.sceneDescToGroup.set(sceneDesc, sceneGroup);
         this.sceneDescToId.set(sceneDesc, id);
-        this.idToSceneDesc.set(id, sceneDesc);
+        let sceneDescs = this.idToSceneDesc.get(id);
+        if (sceneDescs === undefined)
+            this.idToSceneDesc.set(id, sceneDescs = []);
+        sceneDescs.push(sceneDesc);
 
         if (this.onchanged !== null)
             this.onchanged();
@@ -574,14 +587,14 @@ class Main {
 
     private _onHashChange(): void {
         const [sceneDescId, sceneSaveState] = this._decodeHash();
-        const sceneDesc = this.sceneDatabase.getSceneDescForId(sceneDescId);
+        const sceneDesc = this.sceneDatabase.getSceneDescForId(sceneDescId, sceneSaveState);
         if (sceneDesc !== null)
             this._loadSceneDesc(sceneDesc, sceneSaveState);
     }
 
     private _loadInitialStateFromHash(): void {
         const [sceneDescId, sceneSaveState] = this._decodeHash();
-        const sceneDesc = this.sceneDatabase.getSceneDescForId(sceneDescId);
+        const sceneDesc = this.sceneDatabase.getSceneDescForId(sceneDescId, sceneSaveState);
         if (sceneDesc !== null) {
             // Load save slot 0 from session storage.
             const key = this.saveManager.getSaveStateSlotKey(sceneDescId, 0);
@@ -728,7 +741,8 @@ class Main {
             byteOffs = this.viewer.scene.serializeSaveState(this._saveStateTmp.buffer as ArrayBuffer, byteOffs);
 
         const s = btoa(this._saveStateTmp, byteOffs);
-        return `ShareData=${s}`;
+        const sceneDescState = this.currentSceneDesc?.serializeSceneDescState?.() ?? null;
+        return sceneDescState !== null ? `${sceneDescState};ShareData=${s}` : `ShareData=${s}`;
     }
 
     private _loadSceneSaveStateVersion2(state: string): boolean {
@@ -774,8 +788,12 @@ class Main {
         if (state.startsWith('A'))
             return this._loadSceneSaveStateVersion3(state.slice(1));
 
-        if (state.startsWith('ShareData='))
-            return this._loadSceneSaveStateVersion3(state.slice(10));
+        // ShareData uses Ascii85, whose alphabet includes ';'. Do not split the
+        // state string on semicolons here; just peel off the ShareData prefix and
+        // treat the rest as the encoded payload.
+        const shareDataIndex = state.indexOf('ShareData=');
+        if (shareDataIndex >= 0)
+            return this._loadSceneSaveStateVersion3(state.slice(shareDataIndex + 10));
 
         return false;
     }

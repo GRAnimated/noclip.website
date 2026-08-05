@@ -5,6 +5,7 @@ import { generateShaderUtil } from "./ShaderUtil.js";
 
 export class RenderMaterial extends OdysseyProgram {
     public isTranslucent: boolean = false;
+    public usePremultipliedAlphaBlend: boolean = false;
 
     constructor(fmat: FMAT, private isRippleMaterial: boolean = false) {
         super(fmat);
@@ -30,6 +31,12 @@ export class RenderMaterial extends OdysseyProgram {
             this.defines.set('OPT_ADDITIVE_XLU', '1');
         const renderTypeIsXlu = renderType === 1 || (renderType === 3 && forwardXlu !== 'Opa');
         this.isTranslucent = (alphaIsTranslucent || this.getShaderOptionBoolean('enable_transparent') || renderTypeIsXlu) && !this.getShaderOptionBoolean(`enable_alphamask`);
+
+        const rgbSrcBlend = fmat.renderInfo.get('color_blend_rgb_src_func')?.values[0];
+        const rgbDstBlend = fmat.renderInfo.get('color_blend_rgb_dst_func')?.values[0];
+        this.usePremultipliedAlphaBlend = this.isTranslucent && !additiveXlu && rgbSrcBlend === 'src_alpha' && rgbDstBlend === 'one_minus_src_alpha';
+        if (this.usePremultipliedAlphaBlend)
+            this.defines.set('OPT_PREMULTIPLIED_ALPHA_BLEND', '1');
 
         if (isRippleMaterial)
             this.defines.set('OPT_RIPPLE_MATERIAL', '1');
@@ -59,30 +66,6 @@ void CalcHdrToLdr(out vec4 ldr, vec4 hdr) {
 void CalcLdrToHdr(out vec4 hdr, vec4 ldr) {
     float scale = pow(ldr.a, mdlEnvView.HDRTranslate_uHDRPower) * mdlEnvView.HDRTranslate_uDynamicRange;
     hdr = vec4(ldr.rgb * scale, scale);
-}
-
-vec4 DecodeCubemap(samplerCube cube, vec3 n, float lod)
-{
-    vec4 tex = textureLod(cube, n, lod);
-    // SMO cubemaps are encoded with power 4 and range 1024 based on al::HdrEncode's constructor
-    float scale = pow(tex.a, 4.0) * 1024.0;
-    return vec4(tex.rgb * scale, scale);
-}
-
-vec4 fetchCubeMap(samplerCube cube, vec3 dir, float bias) {
-    return textureLod(cube, dir, bias);
-}
-
-vec4 fetchCubeMapConvertHdr(samplerCube cube, vec3 dir, float bias) {
-    return DecodeCubemap(cube, dir, bias);
-}
-
-vec4 fetchCubeMapIrradiance(samplerCube cube, vec3 dir) {
-    return textureLod(cube, dir, 5.0);
-}
-
-vec4 fetchCubeMapIrradianceConvertHdr(samplerCube cube, vec3 dir) {
-    return DecodeCubemap(cube, dir, 5.0);
 }
 `;
 
@@ -1017,7 +1000,14 @@ void main() {
 
     // Light output diffuse + specular
     light_buf.rgb = diffuseTerm + specularTerm;
-    light_buf.a = alpha * modelInfo.model_alpha_mask;
+
+    float output_alpha = alpha * modelInfo.model_alpha_mask;
+#ifdef OPT_PREMULTIPLIED_ALPHA_BLEND
+    light_buf.rgb *= max(output_alpha, 0.0);
+    light_buf.a = clamp01(output_alpha);
+#else
+    light_buf.a = output_alpha;
+#endif
 
     // Cloth Emission
     if (${this.getShaderOptionBoolean('enable_cloth_nov')} == true)
@@ -1045,7 +1035,8 @@ void main() {
     light_buf.rgb = max(light_buf.rgb, 0.0);
     light_buf.rgb = min(light_buf.rgb, 2048.0);
 
-    light_buf.rgb = CalculateFog(light_buf.rgb, eye_to_pos, v_WorldPos);
+    if (mdlEnvView.cIsDeferredFog < 0.5)
+        light_buf.rgb = CalculateFog(light_buf.rgb, eye_to_pos, v_WorldPos);
 
 #ifdef OPT_RIPPLE_MATERIAL
     // InitRippleParam replacement materials are drawn with RGB replace / alpha preserve

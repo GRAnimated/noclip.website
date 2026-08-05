@@ -9,12 +9,12 @@ import { GfxDevice, GfxSampler, GfxWrapMode, GfxMipFilterMode, GfxTexFilterMode,
 import * as BNTX from '../fres_nx/bntx.js';
 import { surfaceToCanvas } from '../Common/bc_texture.js';
 import { translateImageFormat, deswizzle, decompress, getImageFormatString, getFormatBlockWidth, getFormatBlockHeight, getFormatBytesPerPixel } from '../fres_nx/tegra_texture.js';
-import { FMDL, FSHP, FMAT, FMAT_RenderInfo, FMAT_RenderInfoType, FVTX, FSHP_Mesh, FRES, FVTX_VertexAttribute, FVTX_VertexBuffer, Texsrt, FMAT_ShaderParam, parseFMAT_ShaderParam_Float, parseFMAT_ShaderParam_Float2, parseFMAT_ShaderParam_Float3, parseFMAT_ShaderParam_Float4, parseFMAT_ShaderParam_Color3, parseFMAT_ShaderParam_Texsrt } from '../fres_nx/bfres.js';
+import { FMDL, FSHP, FMAT, FMAT_RenderInfo, FMAT_RenderInfoType, FVTX, FSHP_Mesh, FRES, FVTX_VertexAttribute, FVTX_VertexBuffer, Texsrt, FMAT_ShaderParam, FSKL_Bone, FSKL_BoneRotationMode, parseFMAT_ShaderParam_Float, parseFMAT_ShaderParam_Float2, parseFMAT_ShaderParam_Float3, parseFMAT_ShaderParam_Float4, parseFMAT_ShaderParam_Color3, parseFMAT_ShaderParam_Texsrt } from '../fres_nx/bfres.js';
 import { GfxRenderInst, makeSortKey, GfxRendererLayer, setSortKeyDepth, setSortKeyBias, getSortKeyLayer, GfxRenderInstManager, GfxRenderInstList } from '../gfx/render/GfxRenderInstManager.js';
 import { TextureAddressMode, FilterMode, IndexFormat, AttributeFormat, getChannelFormat, getTypeFormat, ChannelFormat } from '../fres_nx/nngfx_enum.js';
 import { nArray, assert, assertExists } from '../util.js';
 import { fillMatrix4x4, fillMatrix4x3 } from '../gfx/helpers/UniformBufferHelpers.js';
-import { mat3, mat4, vec2, vec3, vec4 } from "gl-matrix";
+import { mat3, mat4, quat, vec2, vec3, vec4 } from "gl-matrix";
 import { CameraController, computeViewMatrix, computeViewSpaceDepthFromWorldSpaceAABB } from '../Camera.js';
 import { AABB } from '../Geometry.js';
 import { reverseDepthForCompareMode } from '../gfx/helpers/ReversedDepthHelpers.js';
@@ -28,6 +28,11 @@ import ArrayBufferSlice from '../ArrayBufferSlice.js';
 import { GfxShaderLibrary } from '../gfx/helpers/GfxShaderLibrary.js';
 import { createBufferFromData, createBufferFromSlice } from '../gfx/helpers/BufferHelpers.js';
 import { generateShaderUtil } from './Shaders/ShaderUtil.js';
+
+const SMO_NEAR_CLIP = 100.0;
+const SMO_FAR_CLIP = 1000000.0;
+const SMO_DEFAULT_CLIPPING_FAR_AREA_DISTANCE = 7000.0;
+const SMO_DEFAULT_CLIPPING_FAR_AREA_DISTANCE_SUB = 4000.0;
 import { OdysseySceneDesc, GraphicsPreset, OdysseyRenderer } from './Scenes_SuperMarioOdyssey.js';
 import { convertToCanvasData } from '../gfx/helpers/TextureConversionHelpers.js';
 import { MathConstants, clamp } from '../MathHelpers.js';
@@ -37,6 +42,7 @@ import { RenderSky } from './Shaders/RenderSky.js';
 import { fillHdrComposeUniforms, HdrCompose } from './Shaders/HdrCompose.js';
 import { RenderCloudLayer } from './Shaders/RenderCloudLayer.js';
 import { LinearDepth } from './Shaders/LinearDepth.js';
+import { fillRenderFogUniforms, RenderFog } from './Shaders/RenderFog.js';
 import { composeLightMapCube, generateLightMapCube, generateLightMapSphere, GeneratedLightMapCube, GeneratedLightMapSphere } from './Render/LightMap.js';
 import { InitRippleParam, findRippleMatParams } from './Render/Ripple.js';
 
@@ -862,10 +868,8 @@ class FMATInstance {
             }
         }
 
-        if (fmat.shaderAssign.shaderArchiveName !== 'alRenderCloudLayer') {
-            for (const assignment of this.program.getMaterialSamplerSlotAssignments())
-                this.fillMaterialSamplerBinding(textureHolder, assignment.textureUnit, assignment.samplerIndex);
-        }
+        for (const assignment of this.program.getMaterialSamplerSlotAssignments())
+            this.fillMaterialSamplerBinding(textureHolder, assignment.textureUnit, assignment.samplerIndex);
 
         const cubemapTextureName = 'Default_' + textureHolder.cubeMapSuffixName;
         let cubemapSampler: GfxSampler | null = null;
@@ -994,9 +998,10 @@ class FMATInstance {
                 depthCompare:   reverseDepthForCompareMode(translateDepthCompare(fmat)),
                 depthWrite,
             };
+            const usePremultipliedAlphaBlend = this.program instanceof RenderMaterial && this.program.usePremultipliedAlphaBlend;
             setAttachmentStateSimple(this.megaStateFlags, {
                 blendMode: GfxBlendMode.Add,
-                blendSrcFactor: additiveXlu ? GfxBlendFactor.One : (isRippleXlu ? GfxBlendFactor.SrcAlpha : (isTranslucent ? translateBlendSrcFactor(fmat) : GfxBlendFactor.One)),
+                blendSrcFactor: additiveXlu || usePremultipliedAlphaBlend ? GfxBlendFactor.One : (isRippleXlu ? GfxBlendFactor.SrcAlpha : (isTranslucent ? translateBlendSrcFactor(fmat) : GfxBlendFactor.One)),
                 blendDstFactor: additiveXlu ? GfxBlendFactor.One : (isRippleXlu ? GfxBlendFactor.OneMinusSrcAlpha : (isTranslucent ? translateBlendDstFactor(fmat) : GfxBlendFactor.Zero)),
             });
             if (isTranslucent && this.megaStateFlags.attachmentsState !== undefined) {
@@ -1205,6 +1210,18 @@ class FMATInstance {
                     break;
             }
         }
+
+        // for CloudLayer:
+        // WrapCoef.x = wrap_coef
+        // WrapCoef.y = 1.0 / (wrap_coef + 1.0)
+        // or else the background cloud layers don't have white wrapped lighting
+        const wrapCoefInfo = fmat.renderInfo.get('wrap_coef');
+        if (wrapCoefInfo !== undefined && wrapCoefInfo.type === FMAT_RenderInfoType.Float && wrapCoefInfo.values.length > 0) {
+            const wrapCoef = wrapCoefInfo.values[0];
+            materialParams.WrapCoef[0] = wrapCoef;
+            materialParams.WrapCoef[1] = 1.0 / (wrapCoef + 1.0);
+        }
+
         this.materialParams = materialParams;
     }
 
@@ -1385,17 +1402,48 @@ function fillModelAdditionalInfo(d: Float32Array, offs: number, info: ModelAddit
 }
 
 function fillTexsrtAsMatrix2x4(d: Float32Array, offs: number, texsrt: Texsrt): number {
-    const c = Math.cos(texsrt.rotation);
-    const s = Math.sin(texsrt.rotation);
-    d[offs++] = texsrt.scaleS * c;
-    d[offs++] = texsrt.scaleT * -s;
-    d[offs++] = texsrt.translationS;
-    d[offs++] = texsrt.scaleS * s;
-    d[offs++] = texsrt.scaleT * c;
-    d[offs++] = texsrt.translationT;
+    const theta = texsrt.rotation * MathConstants.DEG_TO_RAD;
+    const sinR = Math.sin(theta);
+    const cosR = Math.cos(theta);
+
+    let m00: number, m01: number, m02: number;
+    let m10: number, m11: number, m12: number;
+
+    if (texsrt.mode === 1) { // Max
+        m00 = texsrt.scaleS *  cosR;
+        m01 = texsrt.scaleS *  sinR;
+        m02 = texsrt.scaleS * ((-cosR * (texsrt.translationS + 0.5)) + (sinR * (texsrt.translationT - 0.5))) + 0.5;
+
+        m10 = texsrt.scaleT * -sinR;
+        m11 = texsrt.scaleT *  cosR;
+        m12 = texsrt.scaleT * (( sinR * (texsrt.translationS + 0.5)) + (cosR * (texsrt.translationT - 0.5))) + 0.5;
+    } else if (texsrt.mode === 2) { // XSI
+        m00 = texsrt.scaleS *  cosR;
+        m01 = texsrt.scaleS * -sinR;
+        m02 = (texsrt.scaleS * sinR) - (texsrt.scaleS * cosR * texsrt.translationS) - (texsrt.scaleS * sinR * texsrt.translationT);
+
+        m10 = texsrt.scaleT * sinR;
+        m11 = texsrt.scaleT * cosR;
+        m12 = (texsrt.scaleT * -cosR) - (texsrt.scaleT * sinR * texsrt.translationS) + (texsrt.scaleT * cosR * texsrt.translationT) + 1.0;
+    } else { // Maya
+        m00 = texsrt.scaleS * cosR;
+        m01 = texsrt.scaleS * sinR;
+        m02 = texsrt.scaleS * ((-0.5 * cosR) - (0.5 * sinR - 0.5) - texsrt.translationS);
+
+        m10 = texsrt.scaleT * -sinR;
+        m11 = texsrt.scaleT *  cosR;
+        m12 = texsrt.scaleT * ((-0.5 * cosR) + (0.5 * sinR - 0.5) + texsrt.translationT) + 1.0;
+    }
+
+    d[offs++] = m00;
+    d[offs++] = m10;
+    d[offs++] = m02;
+    d[offs++] = m01;
+    d[offs++] = m11;
+    d[offs++] = m12;
     d[offs++] = 0.0;
     d[offs++] = 0.0;
-    
+
     return 8; // vec4 * 2
 }
 
@@ -1547,6 +1595,9 @@ export class FSHPMeshData {
     public indexBufferDescriptor: GfxIndexBufferDescriptor;
     public inputLayout: GfxInputLayout;
     public indexBuffer: GfxBuffer;
+    public indexStart: number;
+    public boundingSphereCenter = vec3.create();
+    public boundingSphereRadius = 0.0;
 
     constructor(cache: GfxRenderCache, public mesh: FSHP_Mesh, fvtxData: FVTXData) {
         const indexBufferFormat = translateIndexFormat(mesh.indexFormat);
@@ -1557,8 +1608,17 @@ export class FSHPMeshData {
         });
     
         this.vertexBufferDescriptors = fvtxData.vertexBufferDescriptors;
-        this.indexBuffer = createBufferFromSlice(cache.device, GfxBufferUsage.Index, GfxBufferFrequencyHint.Static, mesh.indexBufferData);
+        const indexBufferData = translateIndexBufferFirstVertex(mesh.indexBufferData, mesh.indexFormat, mesh.offset);
+        this.indexBuffer = createBufferFromData(cache.device, GfxBufferUsage.Index, GfxBufferFrequencyHint.Static, indexBufferData);
         this.indexBufferDescriptor = { buffer: this.indexBuffer };
+        this.indexStart = 0;
+
+        vec3.add(this.boundingSphereCenter, mesh.bbox.min, mesh.bbox.max);
+        vec3.scale(this.boundingSphereCenter, this.boundingSphereCenter, 0.5);
+        const ex = (mesh.bbox.max[0] - mesh.bbox.min[0]) * 0.5;
+        const ey = (mesh.bbox.max[1] - mesh.bbox.min[1]) * 0.5;
+        const ez = (mesh.bbox.max[2] - mesh.bbox.min[2]) * 0.5;
+        this.boundingSphereRadius = Math.hypot(ex, ey, ez);
     }
 
     public destroy(device: GfxDevice): void {
@@ -1580,16 +1640,347 @@ export class FSHPData {
     }
 }
 
+export interface GraphicsQualityParam {
+    Name?: string;
+    ParamType?: number;
+    Rank?: number;
+    GlobalMipBias?: number;
+    StageGlobalMipBias?: number;
+    IsForceStageGlobalMipBias?: boolean;
+    LodDistanceScale?: number;
+    IsEnableLod?: boolean;
+}
+
+export interface GpuPerfAreaParam {
+    AreaName?: string;
+    IsEnableLpp?: boolean;
+    IsEnableOcclusionCulling?: boolean;
+    LodDistanceScale?: number;
+}
+
+export class GraphicsQualityInfo {
+    public globalMipBias = 0.0;
+    public lodDistanceScale = 1.0;
+    public isEnableLod = true;
+    public isEnableOcclusionCulling = false;
+    public isEnableLpp = true;
+
+    private projectParam: GraphicsQualityParam | null = null;
+    private stageParam: GraphicsQualityParam | null = null;
+    private gpuPerfAreaParam: GpuPerfAreaParam | null = null;
+
+    public applyProjectParam(param: GraphicsQualityParam): void {
+        this.projectParam = param;
+        this.recompute();
+    }
+
+    public applyStageParam(param: GraphicsQualityParam): void {
+        this.stageParam = param;
+        this.recompute();
+    }
+
+    public applyGpuPerfAreaParam(param: GpuPerfAreaParam | null): void {
+        if (this.gpuPerfAreaParam === param)
+            return;
+        this.gpuPerfAreaParam = param;
+        this.recompute();
+    }
+
+    private applyStageLikeParam(param: GraphicsQualityParam): void {
+        this.lodDistanceScale = param.LodDistanceScale ?? this.lodDistanceScale;
+        this.isEnableLod = param.IsEnableLod ?? this.isEnableLod;
+        this.isEnableOcclusionCulling = (param as any).IsEnableOcclusionCulling ?? this.isEnableOcclusionCulling;
+        this.isEnableLpp = (param as any).IsEnableLpp ?? this.isEnableLpp;
+        if (param.IsForceStageGlobalMipBias)
+            this.globalMipBias = param.StageGlobalMipBias ?? this.globalMipBias;
+    }
+
+    private recompute(): void {
+        this.globalMipBias = 0.0;
+        this.lodDistanceScale = 1.0;
+        this.isEnableLod = true;
+        this.isEnableOcclusionCulling = false;
+        this.isEnableLpp = true;
+
+        if (this.projectParam !== null) {
+            this.applyStageLikeParam(this.projectParam);
+            this.globalMipBias = this.projectParam.GlobalMipBias ?? this.globalMipBias;
+        }
+
+        if (this.stageParam !== null)
+            this.applyStageLikeParam(this.stageParam);
+
+        if (this.gpuPerfAreaParam !== null) {
+            this.lodDistanceScale *= this.gpuPerfAreaParam.LodDistanceScale ?? 1.0;
+            this.isEnableOcclusionCulling = this.gpuPerfAreaParam.IsEnableOcclusionCulling ?? this.isEnableOcclusionCulling;
+            this.isEnableLpp = this.gpuPerfAreaParam.IsEnableLpp ?? this.isEnableLpp;
+        }
+    }
+}
+
+export interface InitLodParam {
+    ModelLod?: number[];
+    ShadowLod?: number[];
+    MaterialLod?: number[];
+    JudgeType?: number;
+    IsSetShadowLod?: boolean;
+    ShadowLodOffset?: number;
+    IsEnableMaterialLod?: boolean;
+}
+
+function normalizeInitLodParam(parsed: any): InitLodParam | null {
+    const root = (parsed?.root && typeof parsed.root === 'object') ? parsed.root : parsed;
+    if (root === null || typeof root !== 'object')
+        return null;
+    return root as InitLodParam;
+}
+
+function readNumberArray(v: any): number[] | null {
+    if (!Array.isArray(v))
+        return null;
+    return v.map((n) => typeof n === 'number' ? n : -1.0);
+}
+
+export class DistanceLevelParam {
+    public distances: number[];
+    public currentLevel = 0;
+    public distanceScale = 1.0;
+
+    constructor(count: number) {
+        this.distances = nArray(count, () => -1.0);
+    }
+
+    public setParam(v: any): void {
+        const distances = readNumberArray(v);
+        if (distances === null)
+            return;
+        const n = Math.min(this.distances.length, distances.length);
+        for (let i = 0; i < n; i++)
+            this.distances[i] = distances[i];
+    }
+
+    public update(distance: number): void {
+        let level = this.distances.length;
+        for (let i = 0; i < this.distances.length; i++) {
+            const threshold = this.distances[i] * this.distanceScale;
+            if (threshold < 0.0 || threshold > distance) {
+                level = i;
+                break;
+            }
+        }
+        this.currentLevel = level;
+    }
+
+    public getDistance(i: number): number {
+        return this.distances[i] * this.distanceScale;
+    }
+}
+
+const lodScratchAABB = new AABB();
+function distancePointToAABB(point: vec3, aabb: AABB): number {
+    let d2 = 0.0;
+    for (let i = 0; i < 3; i++) {
+        const v = point[i];
+        let delta = 0.0;
+        if (v < aabb.min[i])
+            delta = aabb.min[i] - v;
+        else if (v > aabb.max[i])
+            delta = v - aabb.max[i];
+        d2 += delta * delta;
+    }
+    return Math.sqrt(d2);
+}
+
+export class ModelLodCtrl {
+    public modelLod: DistanceLevelParam;
+    public shadowLod = new DistanceLevelParam(5);
+    public materialLod = new DistanceLevelParam(1);
+    public judgeType = 0;
+    public isGlobalEnabled = true;
+    public isValidate = true;
+    public forcedLevel = -1;
+    public shadowLodOffset = 0;
+    public isSetShadowLod = true;
+    public isEnableMaterialLodValue = false;
+
+    constructor(public modelBBox: AABB, public lodModelCount: number) {
+        this.modelLod = new DistanceLevelParam(Math.max(lodModelCount, 1));
+    }
+
+    public init(initLod: InitLodParam | null): void {
+        if (initLod === null) {
+            this.isValidate = false;
+            return;
+        }
+
+        this.modelLod.setParam(initLod.ModelLod);
+        this.shadowLod.setParam(initLod.ShadowLod);
+        this.materialLod.setParam(initLod.MaterialLod);
+        this.judgeType = initLod.JudgeType ?? this.judgeType;
+        this.isSetShadowLod = initLod.IsSetShadowLod ?? this.isSetShadowLod;
+        this.shadowLodOffset = Math.max(initLod.ShadowLodOffset ?? this.shadowLodOffset, 0);
+        this.isEnableMaterialLodValue = initLod.IsEnableMaterialLod ?? this.isEnableMaterialLodValue;
+    }
+
+    public initFallback(): void {
+        // TODO: this only contributes to some of the LOD in the game so 5000 is forced here until those are added
+        const generated = nArray(this.lodModelCount, (i) => i < this.lodModelCount - 1 ? 5000.0 * Math.pow(3.0, i) : -1.0);
+        this.modelLod.setParam(generated);
+        this.shadowLod.setParam(nArray(5, () => -1.0));
+        this.materialLod.setParam([-1.0]);
+        this.judgeType = 1;
+    }
+
+    public isEnableMaterialLod(): boolean {
+        return this.isEnableMaterialLodValue && this.isGlobalEnabled;
+    }
+
+    public setDistanceScale(v: number): void {
+        this.modelLod.distanceScale = v;
+        this.shadowLod.distanceScale = v;
+        this.materialLod.distanceScale = v;
+    }
+
+    public update(viewerInput: Viewer.ViewerRenderInput, modelMatrix: mat4): void {
+        if (!this.isValidate || !this.isGlobalEnabled)
+            return;
+
+        const cameraPos = vec3.fromValues(
+            viewerInput.camera.worldMatrix[12],
+            viewerInput.camera.worldMatrix[13],
+            viewerInput.camera.worldMatrix[14],
+        );
+        let distance = 0.0;
+        if (this.judgeType === 1) {
+            lodScratchAABB.transform(this.modelBBox, modelMatrix);
+            distance = distancePointToAABB(cameraPos, lodScratchAABB);
+        } else if (this.judgeType === 0) {
+            const dx = modelMatrix[12] - cameraPos[0];
+            const dy = modelMatrix[13] - cameraPos[1];
+            const dz = modelMatrix[14] - cameraPos[2];
+            distance = Math.hypot(dx, dy, dz);
+        }
+
+        const fovyDegree = clamp(viewerInput.camera.fovY * MathConstants.RAD_TO_DEG, 1.0, 89.0);
+        const adjustedDistance = distance * (Math.tan(fovyDegree * MathConstants.DEG_TO_RAD) / 0.8391);
+        this.modelLod.update(adjustedDistance);
+        this.shadowLod.update(adjustedDistance);
+        this.materialLod.update(adjustedDistance);
+    }
+
+    public getModelLevel(): number {
+        if (!this.isValidate || !this.isGlobalEnabled)
+            return 0;
+        const level = this.forcedLevel === -1 ? this.modelLod.currentLevel : this.forcedLevel;
+        return Math.min(level, this.lodModelCount - 1);
+    }
+
+    public getModelLevelNoClamp(): number {
+        if (!this.isValidate || !this.isGlobalEnabled)
+            return 0;
+        return this.forcedLevel === -1 ? this.modelLod.currentLevel : this.forcedLevel;
+    }
+
+    public getShadowLevel(): number {
+        if (!this.isValidate || !this.isGlobalEnabled)
+            return 0;
+        const maxLevel = this.lodModelCount - 1;
+        let level: number;
+        if (this.isSetShadowLod)
+            level = this.shadowLod.currentLevel;
+        else
+            level = this.getModelLevel();
+        return Math.min(level + this.shadowLodOffset, maxLevel);
+    }
+
+    public getMaterialLevel(): number {
+        if (!this.isEnableMaterialLod())
+            return 0;
+        return this.materialLod.currentLevel >= 1 ? 1 : this.materialLod.currentLevel;
+    }
+}
+
+export class ModelLodAllCtrl {
+    public isEnabled = true;
+    public distanceScale = 1.0;
+    private prevDistanceScale = 1.0;
+    private needsUpdate = true;
+    private ctrls: ModelLodCtrl[] = [];
+
+    public registerLodCtrl(ctrl: ModelLodCtrl | null): void {
+        if (ctrl !== null && this.ctrls.indexOf(ctrl) < 0) {
+            this.ctrls.push(ctrl);
+            this.needsUpdate = true;
+        }
+    }
+
+    public update(viewerInput: Viewer.ViewerRenderInput, renderers: FMDLRenderer[], graphicsQualityInfo: GraphicsQualityInfo, debugModelLodDistanceScale: number = 1.0): void {
+        this.isEnabled = graphicsQualityInfo.isEnableLod;
+        this.distanceScale = graphicsQualityInfo.lodDistanceScale * debugModelLodDistanceScale;
+
+        if (this.needsUpdate || this.prevDistanceScale !== this.distanceScale) {
+            for (let i = 0; i < this.ctrls.length; i++) {
+                this.ctrls[i].isGlobalEnabled = this.isEnabled;
+                this.ctrls[i].setDistanceScale(this.distanceScale);
+            }
+            this.needsUpdate = false;
+            this.prevDistanceScale = this.distanceScale;
+        }
+
+        for (let i = 0; i < renderers.length; i++)
+            renderers[i].modelLodCtrl?.update(viewerInput, renderers[i].modelMatrix);
+    }
+}
+
+const boneLocalScratch = mat4.create();
+const boneQuatScratch = quat.create();
+
+function calcBoneLocalMatrix(dst: mat4, bone: FSKL_Bone): void {
+    if (bone.rotationMode === FSKL_BoneRotationMode.EulerXyz) {
+        // BFRES stores Euler bones in radians while gl-matrix's helper takes degrees
+        quat.fromEuler(boneQuatScratch,
+            bone.rotation[0] * MathConstants.RAD_TO_DEG,
+            bone.rotation[1] * MathConstants.RAD_TO_DEG,
+            bone.rotation[2] * MathConstants.RAD_TO_DEG);
+    } else {
+        quat.set(boneQuatScratch, bone.rotation[0], bone.rotation[1], bone.rotation[2], bone.rotation[3]);
+        quat.normalize(boneQuatScratch, boneQuatScratch);
+    }
+
+    mat4.fromRotationTranslationScale(dst, boneQuatScratch, bone.translation, bone.scale);
+}
+
+function calcBoneModelMatrices(bones: FSKL_Bone[]): mat4[] {
+    const boneMatrices = nArray(bones.length, () => mat4.create());
+    for (let i = 0; i < bones.length; i++) {
+        const bone = bones[i];
+        calcBoneLocalMatrix(boneLocalScratch, bone);
+        if (bone.parentIndex >= 0 && bone.parentIndex < boneMatrices.length)
+            mat4.mul(boneMatrices[i], boneMatrices[bone.parentIndex], boneLocalScratch);
+        else
+            mat4.copy(boneMatrices[i], boneLocalScratch);
+    }
+    return boneMatrices;
+}
+
 export class FMDLData {
     public fvtxData: FVTXData[] = [];
     public fshpData: FSHPData[] = [];
+    public modelBBox = new AABB();
+    public initLodParam: InitLodParam | null;
+    public boneMatrices: mat4[];
 
-    constructor(cache: GfxRenderCache, public fmdl: FMDL, public materialLightCategoryMap: Map<string, string> | null = null, public initRippleParam: InitRippleParam | null = null) {
+    constructor(cache: GfxRenderCache, public fmdl: FMDL, public materialLightCategoryMap: Map<string, string> | null = null, public initRippleParam: InitRippleParam | null = null, initLodParam: any = null) {
+        this.initLodParam = normalizeInitLodParam(initLodParam);
+        this.boneMatrices = calcBoneModelMatrices(fmdl.fskl.bones);
         for (let i = 0; i < fmdl.fvtx.length; i++)
             this.fvtxData.push(new FVTXData(cache.device, fmdl.fvtx[i]));
         for (let i = 0; i < fmdl.fshp.length; i++) {
             const fshp = fmdl.fshp[i];
-            this.fshpData.push(new FSHPData(cache, fshp, this.fvtxData[fshp.vertexIndex]));
+            const fshpData = new FSHPData(cache, fshp, this.fvtxData[fshp.vertexIndex]);
+            this.fshpData.push(fshpData);
+            if (fshpData.meshData.length > 0)
+                this.modelBBox.union(this.modelBBox, fshpData.meshData[0].mesh.bbox);
         }
     }
 
@@ -1599,6 +1990,27 @@ export class FMDLData {
         for (let i = 0; i < this.fshpData.length; i++)
             this.fshpData[i].destroy(device);
     }
+}
+
+function translateIndexBufferFirstVertex(indexBufferData: ArrayBufferSlice, indexFormat: IndexFormat, firstVertex: number): ArrayBuffer {
+    const src = indexBufferData.createDataView();
+    const dst = new ArrayBuffer(indexBufferData.byteLength);
+    const view = new DataView(dst);
+
+    if (indexFormat === IndexFormat.Uint8) {
+        for (let i = 0; i < indexBufferData.byteLength; i++)
+            view.setUint8(i, src.getUint8(i) + firstVertex);
+    } else if (indexFormat === IndexFormat.Uint16) {
+        for (let offs = 0; offs < indexBufferData.byteLength; offs += 2)
+            view.setUint16(offs, src.getUint16(offs, true) + firstVertex, true);
+    } else if (indexFormat === IndexFormat.Uint32) {
+        for (let offs = 0; offs < indexBufferData.byteLength; offs += 4)
+            view.setUint32(offs, src.getUint32(offs, true) + firstVertex, true);
+    } else {
+        throw "whoops";
+    }
+
+    return dst;
 }
 
 function translateIndexFormat(indexFormat: IndexFormat): GfxFormat {
@@ -1612,13 +2024,12 @@ function translateIndexFormat(indexFormat: IndexFormat): GfxFormat {
 
 class FSHPMeshInstance {
     constructor(public meshData: FSHPMeshData) {
-        assert(this.meshData.mesh.offset === 0);
     }
 
     public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
         // TODO(jstpierre): Do we have to care about submeshes?
         const renderInst = renderInstManager.newRenderInst();
-        renderInst.setDrawCount(this.meshData.mesh.count);
+        renderInst.setDrawCount(this.meshData.mesh.count, this.meshData.indexStart);
         renderInst.setVertexInput(this.meshData.inputLayout, this.meshData.vertexBufferDescriptors, this.meshData.indexBufferDescriptor);
 
         const depth = computeViewSpaceDepthFromWorldSpaceAABB(viewerInput.camera.viewMatrix, this.meshData.mesh.bbox);
@@ -1639,27 +2050,29 @@ export function latLonToDirection(latitudeRad: number, longitudeRad: number): { 
 }
 
 const scratchMatrix = mat4.create();
-const bboxScratch = new AABB();
-class FSHPInstance {
-    public lodMeshInstances: FSHPMeshInstance[] = [];
-    public visible = true;
-    public enableCulling = true;
+const shapeModelMatrixScratch = mat4.create();
+const sphereCenterScratch = vec3.create();
 
-    constructor(public fshpData: FSHPData, private fmatInstance: FMATInstance) {
-        // Only construct the first LOD mesh for now.
-        for (let i = 0; i < 1; i++)
-            this.lodMeshInstances.push(new FSHPMeshInstance(fshpData.meshData[i]));
+function getMatrixMaxScale(m: mat4): number {
+    const sx = Math.hypot(m[0], m[1], m[2]);
+    const sy = Math.hypot(m[4], m[5], m[6]);
+    const sz = Math.hypot(m[8], m[9], m[10]);
+    return Math.max(sx, sy, sz);
+}
+
+export class SimpleModelEnv {
+    private viewerInput: Viewer.ViewerRenderInput | null = null;
+    private invExposure = 1.0;
+    private globalLodBias = 0.0;
+
+    public updateEnv(viewerInput: Viewer.ViewerRenderInput, invExposure: number, graphicsQualityInfo: GraphicsQualityInfo, debugGlobalLodBiasOffset: number = 0.0): void {
+        this.viewerInput = viewerInput;
+        this.invExposure = invExposure;
+        this.globalLodBias = graphicsQualityInfo.globalMipBias + debugGlobalLodBiasOffset;
     }
 
-    public computeModelView(modelMatrix: mat4, viewerInput: Viewer.ViewerRenderInput): mat4 {
-        // Build view matrix
-        const viewMatrix = scratchMatrix;
-        computeViewMatrix(viewMatrix, viewerInput.camera);
-        mat4.mul(viewMatrix, viewMatrix, modelMatrix);
-        return viewMatrix;
-    }
-
-    private fillMdlEnvView(d: Float32Array, offs: number, viewerInput: Viewer.ViewerRenderInput, modelMatrix: mat4): number {
+    public fillMdlEnvView(d: Float32Array, offs: number): number {
+        const viewerInput = assertExists(this.viewerInput);
         const preset = OdysseyRenderer.graphicsPreset!;
         
         d[offs++] = 4.0;     // HDRTranslate_uHDRPower
@@ -1714,7 +2127,7 @@ class FSHPInstance {
         offs += fillMatrix4x3(d, offs, invProjViewNoTrans);
         
         // cInvExposure and uIrradianceScale
-        d[offs++] = 1.0;  // cInvExposure
+        d[offs++] = this.invExposure;
         d[offs++] = 1.0;  // uIrradianceScale
         offs += 2;
         
@@ -1745,12 +2158,12 @@ class FSHPInstance {
         d[offs++] = viewerInput.camera.worldMatrix[14];
         offs += 1; // padding
 
-        // cGlobalLodBias, TODO: graphics quality params
-        d[offs++] = 0.0;
+        // cGlobalLodBias
+        d[offs++] = this.globalLodBias;
         offs += 3; // padding
 
-        let fog = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1 };
-        let yFog = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1 };
+        let fog: any = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1, IsDeferredFog: false };
+        let yFog: any = { Color: { R: 0, G: 0, B: 0 }, IsEnable: false, Slope: 0, Start: 0, Max: 1, IsDeferredFog: false };
         if (preset !== null) {
             fog = preset.Fog;
             yFog = preset.YFog;
@@ -1761,21 +2174,17 @@ class FSHPInstance {
         d[offs++] = fog.Color.R / 255.0;
         d[offs++] = fog.Color.G / 255.0;
         d[offs++] = fog.Color.B / 255.0;
-        // d[offs++] = 1.0;
-        // d[offs++] = 0.0;
-        // d[offs++] = 0.0;
         d[offs++] = fog.IsEnable ? fog.Slope / 1000.0 : 0.0;
-        
+
         d[offs++] = fog.Start;
         d[offs++] = fog.Max;
         offs += 2; // padding
-        
+
         // cYFogColor
         d[offs++] = yFog.Color.R / 255.0;
         d[offs++] = yFog.Color.G / 255.0;
         d[offs++] = yFog.Color.B / 255.0;
         d[offs++] = yFog.IsEnable ? yFog.Slope / 1000.0 : 0.0;
-        // d[offs++] = 0.0; // TODO: y fog is broken
         
         d[offs++] = yFog.Start;
         d[offs++] = yFog.Max;
@@ -1796,16 +2205,44 @@ class FSHPInstance {
         d[offs++] = viewAxisZ[0];
         d[offs++] = viewAxisZ[1];
         d[offs++] = viewAxisZ[2];
-        d[offs++] = 0.0;
+        d[offs++] = (fog.IsDeferredFog || yFog.IsDeferredFog) ? 1.0 : 0.0;
         
         return offs;
     }
+}
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, modelMatrix: mat4, viewerInput: Viewer.ViewerRenderInput): void {
+class FSHPInstance {
+    public lodMeshInstances: FSHPMeshInstance[] = [];
+    public visible = true;
+    public enableCulling = true;
+
+    constructor(public fshpData: FSHPData, private fmatInstance: FMATInstance, private boneMatrix: mat4 | null = null) {
+        for (let i = 0; i < fshpData.meshData.length; i++)
+            this.lodMeshInstances.push(new FSHPMeshInstance(fshpData.meshData[i]));
+    }
+
+    public computeModelView(modelMatrix: mat4, viewerInput: Viewer.ViewerRenderInput): mat4 {
+        // Build view matrix
+        const viewMatrix = scratchMatrix;
+        computeViewMatrix(viewMatrix, viewerInput.camera);
+        mat4.mul(viewMatrix, viewMatrix, modelMatrix);
+        return viewMatrix;
+    }
+
+
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, modelMatrix: mat4, viewerInput: Viewer.ViewerRenderInput, simpleModelEnv: SimpleModelEnv, modelLodLevel: number): void {
         if (!this.visible)
             return;
 
-        // TODO(jstpierre): Joints.
+        const lodMeshInstance = this.lodMeshInstances[Math.min(modelLodLevel, this.lodMeshInstances.length - 1)];
+        const shapeModelMatrix = this.boneMatrix !== null ? mat4.mul(shapeModelMatrixScratch, modelMatrix, this.boneMatrix) : modelMatrix;
+        if (this.enableCulling) {
+            vec3.transformMat4(sphereCenterScratch, lodMeshInstance.meshData.boundingSphereCenter, shapeModelMatrix);
+            const radius = lodMeshInstance.meshData.boundingSphereRadius * getMatrixMaxScale(shapeModelMatrix);
+            if (!viewerInput.camera.frustum.containsSphere(sphereCenterScratch, radius))
+                return;
+        }
+
         const template = renderInstManager.pushTemplate();
 
         // ub_ShapeParams
@@ -1813,12 +2250,12 @@ class FSHPInstance {
         const d = template.mapUniformBufferF32(OdysseyProgram.ub_ShapeParams);
         offs += fillMatrix4x4(d, offs, viewerInput.camera.projectionMatrix);
         offs += fillMatrix4x3(d, offs, viewerInput.camera.viewMatrix);
-        offs += fillMatrix4x3(d, offs, modelMatrix);
+        offs += fillMatrix4x3(d, offs, shapeModelMatrix);
 
         // ub_MdlEnvView has camera, environment, HDRTranslate, cGlobalLodBias, and fog data.
         const mdlEnvOffs = template.allocateUniformBuffer(OdysseyProgram.ub_MdlEnvView, 152);
         const envData = template.mapUniformBufferF32(OdysseyProgram.ub_MdlEnvView);
-        this.fillMdlEnvView(envData, mdlEnvOffs, viewerInput, modelMatrix);
+        simpleModelEnv.fillMdlEnvView(envData, mdlEnvOffs);
          
         // ub_CloudMaterial
         if (this.fmatInstance.fmat.shaderAssign.shaderArchiveName === 'alRenderCloudLayer') {
@@ -1838,13 +2275,7 @@ class FSHPInstance {
         
         this.fmatInstance.setOnRenderInst(device, template);
 
-        for (let i = 0; i < this.lodMeshInstances.length; i++) {
-            bboxScratch.transform(this.lodMeshInstances[i].meshData.mesh.bbox, modelMatrix);
-            if (this.enableCulling && !viewerInput.camera.frustum.contains(bboxScratch))
-                continue;
-
-            this.lodMeshInstances[i].prepareToRender(device, renderInstManager, viewerInput);
-        }
+        lodMeshInstance.prepareToRender(device, renderInstManager, viewerInput);
 
         renderInstManager.popTemplate();
     }
@@ -1856,10 +2287,19 @@ export class FMDLRenderer {
     public modelMatrix = mat4.create();
     public visible = true;
     public name: string;
+    public modelLodCtrl: ModelLodCtrl | null = null;
 
     constructor(device: GfxDevice, cache: GfxRenderCache, public textureHolder: BRTITextureHolder, public fmdlData: FMDLData, archiveName: string) {
         const fmdl = this.fmdlData.fmdl;
         this.name = fmdl.name;
+        const lodModelCount = Math.max(1, ...this.fmdlData.fshpData.map((fshpData) => fshpData.meshData.length));
+        if (this.fmdlData.initLodParam !== null || lodModelCount > 1) {
+            this.modelLodCtrl = new ModelLodCtrl(this.fmdlData.modelBBox, lodModelCount);
+            if (this.fmdlData.initLodParam !== null)
+                this.modelLodCtrl.init(this.fmdlData.initLodParam);
+            else
+                this.modelLodCtrl.initFallback();
+        }
 
         for (let i = 0; i < fmdl.fmat.length; i++)
             this.fmatInst.push(new FMATInstance(device, cache, this.textureHolder, fmdl.fmat[i], archiveName, this.fmdlData.materialLightCategoryMap, this.fmdlData.initRippleParam));
@@ -1867,7 +2307,8 @@ export class FMDLRenderer {
         for (let i = 0; i < this.fmdlData.fshpData.length; i++) {
             const fshpData = this.fmdlData.fshpData[i];
             const fmatInstance = this.fmatInst[fshpData.fshp.materialIndex];
-            this.fshpInst.push(new FSHPInstance(fshpData, fmatInstance));
+            const boneMatrix = this.fmdlData.boneMatrices[fshpData.fshp.boneIndex] ?? null;
+            this.fshpInst.push(new FSHPInstance(fshpData, fmatInstance, boneMatrix));
         }
     }
 
@@ -1875,15 +2316,16 @@ export class FMDLRenderer {
         this.visible = v;
     }
 
-    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
+    public prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, simpleModelEnv: SimpleModelEnv): void {
         if (!this.visible)
             return;
 
         const template = renderInstManager.pushTemplate();
         template.setBindingLayouts(bindingLayouts);
 
+        const modelLodLevel = this.modelLodCtrl !== null ? this.modelLodCtrl.getModelLevel() : 0;
         for (let i = 0; i < this.fshpInst.length; i++)
-            this.fshpInst[i].prepareToRender(device, renderInstManager, this.modelMatrix, viewerInput);
+            this.fshpInst[i].prepareToRender(device, renderInstManager, this.modelMatrix, viewerInput, simpleModelEnv, modelLodLevel);
 
         renderInstManager.popTemplate();
     }
@@ -1912,7 +2354,7 @@ export class SkyRenderer extends FMDLRenderer {
         }
     }
 
-    public override prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput): void {
+    public override prepareToRender(device: GfxDevice, renderInstManager: GfxRenderInstManager, viewerInput: Viewer.ViewerRenderInput, simpleModelEnv: SimpleModelEnv): void {
         if (!this.visible)
             return;
 
@@ -1922,25 +2364,93 @@ export class SkyRenderer extends FMDLRenderer {
         template.setBindingLayouts(bindingLayouts);
 
         for (let i = 0; i < this.fshpInst.length; i++) {
-            this.fshpInst[i].prepareToRender(device, renderInstManager, this.modelMatrix, viewerInput);
+            this.fshpInst[i].prepareToRender(device, renderInstManager, this.modelMatrix, viewerInput, simpleModelEnv, 0);
         }
 
         renderInstManager.popTemplate();
     }
 }
 
-export class BasicFRESRenderer {
+export interface GraphicsRenderInfo {
+    device: GfxDevice;
+    viewerInput: Viewer.ViewerRenderInput;
+    renderInstManager: GfxRenderInstManager;
+    viewIndex: number;
+}
+
+class StageAreaVolumeBase {
+    private worldToArea = mat4.create();
+
+    constructor(placement: mat4, translate: vec3, rotateDeg: vec3, public scale: vec3, public priority: number = 0) {
+        const areaToWorld = mat4.clone(placement);
+        mat4.translate(areaToWorld, areaToWorld, translate);
+        mat4.rotateZ(areaToWorld, areaToWorld, rotateDeg[2] * MathConstants.DEG_TO_RAD);
+        mat4.rotateY(areaToWorld, areaToWorld, rotateDeg[1] * MathConstants.DEG_TO_RAD);
+        mat4.rotateX(areaToWorld, areaToWorld, rotateDeg[0] * MathConstants.DEG_TO_RAD);
+        mat4.invert(this.worldToArea, areaToWorld);
+    }
+
+    public containsWorldPoint(p: vec3): boolean {
+        const local = vec3.transformMat4(vec3.create(), p, this.worldToArea);
+        return Math.abs(local[0]) <= this.scale[0] * 500.0 &&
+            Math.abs(local[1]) <= this.scale[1] * 500.0 &&
+            Math.abs(local[2]) <= this.scale[2] * 500.0;
+    }
+}
+
+export class GpuPerfAreaVolume extends StageAreaVolumeBase {
+    constructor(public param: GpuPerfAreaParam, placement: mat4, translate: vec3, rotateDeg: vec3, scale: vec3, priority: number = 0) {
+        super(placement, translate, rotateDeg, scale, priority);
+    }
+}
+
+export class ClippingFarAreaVolume extends StageAreaVolumeBase {
+    constructor(
+        public farClipDistance: number,
+        public farClipDistanceSub: number,
+        placement: mat4,
+        translate: vec3,
+        rotateDeg: vec3,
+        scale: vec3,
+        priority: number = 0,
+    ) {
+        super(placement, translate, rotateDeg, scale, priority);
+    }
+}
+
+export class RenderVariables {
+    constructor(
+        public builder: any,
+        public hdrColorTargetID: GfxrRenderTargetID,
+        public mainDepthTargetID: GfxrRenderTargetID,
+        public opaqueColorResolveTextureID: any | null = null,
+        public linearDepthTargetID: GfxrRenderTargetID | null = null,
+        public linearDepthResolveTextureID: any | null = null,
+    ) {
+    }
+}
+
+export class ViewRenderer {
     public renderHelper: GfxRenderHelper;
     private renderInstListSky = new GfxRenderInstList();
     private renderInstListMain = new GfxRenderInstList();
     private renderInstListTranslucent = new GfxRenderInstList();
     public fmdlRenderers: FMDLRenderer[] = [];
     public skyRenderers: SkyRenderer[] = [];
+    private simpleModelEnv = new SimpleModelEnv();
+    private modelLodAllCtrl = new ModelLodAllCtrl();
+    public graphicsQualityInfo = new GraphicsQualityInfo();
+    public gpuPerfAreaVolumes: GpuPerfAreaVolume[] = [];
+    public clippingFarAreaVolumes: ClippingFarAreaVolume[] = [];
+    private clippingFarAreaDistance = SMO_DEFAULT_CLIPPING_FAR_AREA_DISTANCE;
+    private clippingFarAreaDistanceSub = SMO_DEFAULT_CLIPPING_FAR_AREA_DISTANCE_SUB;
 
     private hdrComposeProgram: HdrCompose;
     private hdrComposeGfxProgram: GfxProgram;
     private linearDepthProgram: LinearDepth;
     private linearDepthGfxProgram: GfxProgram;
+    private renderFogProgram: RenderFog;
+    private renderFogGfxProgram: GfxProgram;
     private hdrTexture: GfxTexture | null = null;
     private exposureTexture: GfxTexture | null = null;
     private fullscreenVertexBuffer: GfxBuffer | null = null;
@@ -1948,8 +2458,12 @@ export class BasicFRESRenderer {
     private fullscreenInputLayout: GfxInputLayout | null = null;
 
     private exposureSlider: UI.Slider;
+    private lodBiasSlider: UI.Slider;
+    private modelLodDistanceScaleSlider: UI.Slider;
 
     private exposure: number = 1.0;
+    private debugGlobalLodBiasOffset: number = 0.0;
+    private debugModelLodDistanceScale: number = 1.0;
     private autoExposure: number = 1.0;
     private exposureTextureData = new Float32Array(4);
 
@@ -1964,6 +2478,9 @@ export class BasicFRESRenderer {
 
         this.linearDepthProgram = new LinearDepth();
         this.linearDepthGfxProgram = this.renderHelper.renderCache.createProgram(this.linearDepthProgram);
+
+        this.renderFogProgram = new RenderFog();
+        this.renderFogGfxProgram = this.renderHelper.renderCache.createProgram(this.renderFogProgram);
 
         this.textureHolder.createLinearDepthTexture(device, 1, 1);
         
@@ -2048,8 +2565,39 @@ export class BasicFRESRenderer {
         this.uploadExposureTexture(this.autoExposure);
     }
 
+    private getHdrComposeExposure(): number {
+        const preset = OdysseyRenderer.graphicsPreset;
+        if (preset === null)
+            return 0.001;
+
+        // our debug slider intentionally scales the preset exposure before HdrCompose sees it for better looking numbers
+        return Math.max(preset.HdrCompose.Exposure * this.exposure, 0.001);
+    }
+
+    private getHdrComposeInvExposure(): number {
+        // al::ViewRenderer::drawHdr:
+        // if (mHdrCompose)
+        //     invExposure = 1.0 / fmaxf(al::HdrCompose::getExposure(mHdrCompose), 0.0001);
+        // else
+        //     invExposure = 1.6667;
+        if (OdysseyRenderer.graphicsPreset === null)
+            return 1.6667;
+
+        return 1.0 / Math.max(this.getHdrComposeExposure(), 0.0001);
+    }
+
     private updateExposureSliderLabel(): void {
         this.exposureSlider.setLabel("Exposure: " + this.exposureSlider.getValue());
+    }
+
+    private updateLodBiasSliderLabel(): void {
+        const totalBias = this.graphicsQualityInfo.globalMipBias + this.debugGlobalLodBiasOffset;
+        this.lodBiasSlider.setLabel(`Texture LOD Bias: ${this.debugGlobalLodBiasOffset.toFixed(2)} (total ${totalBias.toFixed(2)})`);
+    }
+
+    private updateModelLodDistanceScaleSliderLabel(): void {
+        const totalScale = this.graphicsQualityInfo.lodDistanceScale * this.debugModelLodDistanceScale;
+        this.modelLodDistanceScaleSlider.setLabel(`Model LOD Distance Scale: ${this.debugModelLodDistanceScale.toFixed(2)}x (total ${totalScale.toFixed(2)}x)`);
     }
 
     public createPanels(): UI.Panel[] {
@@ -2071,24 +2619,84 @@ export class BasicFRESRenderer {
         };
         cameraPanel.contents.appendChild(this.exposureSlider.elem);
 
+        this.lodBiasSlider = new UI.Slider();
+        this.lodBiasSlider.setRange(-5, 5, 0.05);
+        this.lodBiasSlider.setValue(0.0);
+        this.updateLodBiasSliderLabel();
+        this.lodBiasSlider.onvalue = () => {
+            this.debugGlobalLodBiasOffset = this.lodBiasSlider.getValue();
+            this.updateLodBiasSliderLabel();
+        };
+        cameraPanel.contents.appendChild(this.lodBiasSlider.elem);
+
+        this.modelLodDistanceScaleSlider = new UI.Slider();
+        this.modelLodDistanceScaleSlider.setRange(0.05, 5, 0.05);
+        this.modelLodDistanceScaleSlider.setValue(1.0);
+        this.updateModelLodDistanceScaleSliderLabel();
+        this.modelLodDistanceScaleSlider.onvalue = () => {
+            this.debugModelLodDistanceScale = this.modelLodDistanceScaleSlider.getValue();
+            this.updateModelLodDistanceScaleSliderLabel();
+        };
+        cameraPanel.contents.appendChild(this.modelLodDistanceScaleSlider.elem);
+
         return [cameraPanel, layersPanel];
     }
 
+    private getCameraPos(viewerInput: Viewer.ViewerRenderInput): vec3 {
+        return vec3.fromValues(viewerInput.camera.worldMatrix[12], viewerInput.camera.worldMatrix[13], viewerInput.camera.worldMatrix[14]);
+    }
+
+    private updateGpuPerfArea(cameraPos: vec3): void {
+        let selected: GpuPerfAreaVolume | null = null;
+        for (let i = 0; i < this.gpuPerfAreaVolumes.length; i++) {
+            const volume = this.gpuPerfAreaVolumes[i];
+            if (!volume.containsWorldPoint(cameraPos))
+                continue;
+            if (selected === null || volume.priority > selected.priority)
+                selected = volume;
+        }
+        this.graphicsQualityInfo.applyGpuPerfAreaParam(selected !== null ? selected.param : null);
+    }
+
+    private updateClippingFarArea(cameraPos: vec3): void {
+        let selected: ClippingFarAreaVolume | null = null;
+        for (let i = 0; i < this.clippingFarAreaVolumes.length; i++) {
+            const volume = this.clippingFarAreaVolumes[i];
+            if (!volume.containsWorldPoint(cameraPos))
+                continue;
+            if (selected === null || volume.priority > selected.priority)
+                selected = volume;
+        }
+
+        this.clippingFarAreaDistance = selected !== null ? selected.farClipDistance : SMO_DEFAULT_CLIPPING_FAR_AREA_DISTANCE;
+        this.clippingFarAreaDistanceSub = selected !== null ? selected.farClipDistanceSub : SMO_DEFAULT_CLIPPING_FAR_AREA_DISTANCE_SUB;
+    }
+
+    private updateStageAreas(viewerInput: Viewer.ViewerRenderInput): void {
+        const cameraPos = this.getCameraPos(viewerInput);
+        this.updateGpuPerfArea(cameraPos);
+        this.updateClippingFarArea(cameraPos);
+    }
+
     private prepareToRender(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput): void {
+        this.updateStageAreas(viewerInput);
         const renderInstManager = this.renderHelper.renderInstManager;
+        for (let i = 0; i < this.fmdlRenderers.length; i++)
+            this.modelLodAllCtrl.registerLodCtrl(this.fmdlRenderers[i].modelLodCtrl);
+        this.modelLodAllCtrl.update(viewerInput, this.fmdlRenderers, this.graphicsQualityInfo, this.debugModelLodDistanceScale);
 
         // Sky
         this.renderHelper.renderInstManager.setCurrentList(this.renderInstListSky);
         this.renderHelper.pushTemplateRenderInst();
         for (let i = 0; i < this.skyRenderers.length; i++)
-            this.skyRenderers[i].prepareToRender(device, renderInstManager, viewerInput);
+            this.skyRenderers[i].prepareToRender(device, renderInstManager, viewerInput, this.simpleModelEnv);
         this.renderHelper.renderInstManager.popTemplate();
 
         // Main scene
         this.renderHelper.renderInstManager.setCurrentList(this.renderInstListMain);
         this.renderHelper.pushTemplateRenderInst();
         for (let i = 0; i < this.fmdlRenderers.length; i++)
-            this.fmdlRenderers[i].prepareToRender(device, renderInstManager, viewerInput);
+            this.fmdlRenderers[i].prepareToRender(device, renderInstManager, viewerInput, this.simpleModelEnv);
         this.renderHelper.renderInstManager.popTemplate();
 
         // translucent objects on their own render pass
@@ -2165,6 +2773,77 @@ export class BasicFRESRenderer {
         return ldrColorTargetID;
     }
 
+    private renderFog(builder: any, hdrColorTargetID: GfxrRenderTargetID, linearDepthResolveTextureID: any, viewerInput: Viewer.ViewerRenderInput): void {
+        const preset = OdysseyRenderer.graphicsPreset as any;
+        if (preset === null || !(preset.Fog?.IsDeferredFog || preset.YFog?.IsDeferredFog))
+            return;
+
+        builder.pushPass((pass: any) => {
+            pass.setDebugName('Deferred Fog');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, hdrColorTargetID);
+            pass.attachResolveTexture(linearDepthResolveTextureID);
+
+            pass.exec((passRenderer: any, scope: any) => {
+                const linearDepthTexture = scope.getResolveTextureForID(linearDepthResolveTextureID);
+
+                const renderInst = this.renderHelper.renderInstManager.newRenderInst();
+                renderInst.setUniformBuffer(this.renderHelper.uniformBuffer);
+                renderInst.setBindingLayouts(RenderFog.bindingLayouts);
+
+                let offs = renderInst.allocateUniformBuffer(RenderFog.ub_RenderFogInfo, 52);
+                const d = renderInst.mapUniformBufferF32(RenderFog.ub_RenderFogInfo);
+                fillRenderFogUniforms(d, offs, preset, viewerInput);
+
+                const depthMapping = new TextureMapping();
+                depthMapping.gfxTexture = linearDepthTexture;
+                depthMapping.gfxSampler = this.renderHelper.renderCache.createSampler({
+                    wrapS: GfxWrapMode.Clamp,
+                    wrapT: GfxWrapMode.Clamp,
+                    minFilter: GfxTexFilterMode.Point,
+                    magFilter: GfxTexFilterMode.Point,
+                    mipFilter: GfxMipFilterMode.Nearest,
+                    minLOD: 0, maxLOD: 0,
+                });
+
+                const skyCubeMapping = new TextureMapping();
+                const cubemapTextureName = 'SkyOnly_' + this.textureHolder.cubeMapSuffixName;
+                this.textureHolder.fillTextureMapping(skyCubeMapping, cubemapTextureName);
+                skyCubeMapping.gfxSampler = this.renderHelper.renderCache.createSampler({
+                    wrapS: GfxWrapMode.Clamp,
+                    wrapT: GfxWrapMode.Clamp,
+                    minFilter: GfxTexFilterMode.Bilinear,
+                    magFilter: GfxTexFilterMode.Bilinear,
+                    mipFilter: GfxMipFilterMode.Linear,
+                    minLOD: 0, maxLOD: 100,
+                });
+
+                renderInst.setSamplerBindingsFromTextureMappings([depthMapping, skyCubeMapping]);
+
+                renderInst.setVertexInput(
+                    this.fullscreenInputLayout!,
+                    [{ buffer: this.fullscreenVertexBuffer!, byteOffset: 0 }],
+                    { buffer: this.fullscreenIndexBuffer!, byteOffset: 0 }
+                );
+                renderInst.setDrawCount(6);
+                renderInst.setGfxProgram(this.renderFogGfxProgram);
+
+                const megaState: Partial<GfxMegaStateDescriptor> = {
+                    cullMode: GfxCullMode.None,
+                    depthCompare: GfxCompareMode.Always,
+                    depthWrite: false,
+                };
+                setAttachmentStateSimple(megaState, {
+                    blendMode: GfxBlendMode.Add,
+                    blendSrcFactor: GfxBlendFactor.SrcAlpha,
+                    blendDstFactor: GfxBlendFactor.OneMinusSrcAlpha,
+                });
+                renderInst.setMegaStateFlags(megaState);
+
+                renderInst.drawOnPass(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+    }
+
     private renderLinearDepth(device: GfxDevice, builder: any, mainDepthTargetID: GfxrRenderTargetID, viewerInput: Viewer.ViewerRenderInput): GfxrRenderTargetID {
         const mainDepthDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
         mainDepthDesc.pixelFormat = GfxFormat.F32_RGBA;
@@ -2228,6 +2907,116 @@ export class BasicFRESRenderer {
         return linearDepthTargetID;
     }
 
+    protected clearRequest(): void {
+        // TODO: al::ViewRenderer::clearRequest
+    }
+
+    protected calcView(graphicsRenderInfo: GraphicsRenderInfo): void {
+        // TODO: al::ViewRenderer::calcView
+        this.updateStageAreas(graphicsRenderInfo.viewerInput);
+        graphicsRenderInfo.viewerInput.camera.setClipPlanes(SMO_NEAR_CLIP, SMO_FAR_CLIP);
+    }
+
+    protected preDrawGraphics(_graphicsRenderInfo: GraphicsRenderInfo): void {
+        // TODO: al::ViewRenderer::preDrawGraphics
+    }
+
+    protected drawSystem(_graphicsRenderInfo: GraphicsRenderInfo, _renderVariables: RenderVariables): void {
+        // TODO: al::ViewRenderer::drawSystem:
+        // - DepthShadowDrawer::allocAndDrawToDepthShadow 
+        // - AtmosScatter / DirectionalLightKeeper directional-light texture update
+        // - CubeMapDirector::renderToCubeMap for material-light/reflection sources
+        // - WorldAODirector::tryDrawAoTexture
+        // - GraphicsSystemInfo::drawSystemPartsGraphics
+        // - DepthShadowMapDirector::drawToDepthShadow
+        // - ColorCorrection::drawMap
+        // - ExecuteDirector custom render targets
+    }
+
+    private drawSky(renderVariables: RenderVariables): void {
+        const builder = renderVariables.builder;
+        builder.pushPass((pass: any) => {
+            pass.setDebugName('Sky');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, renderVariables.hdrColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, renderVariables.mainDepthTargetID);
+            pass.exec((passRenderer: any) => {
+                this.renderInstListSky.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+    }
+
+    private drawMainOpaque(renderVariables: RenderVariables): void {
+        const builder = renderVariables.builder;
+        builder.pushPass((pass: any) => {
+            pass.setDebugName('Main Opaque');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, renderVariables.hdrColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, renderVariables.mainDepthTargetID);
+            pass.exec((passRenderer: any) => {
+                this.renderInstListMain.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+    }
+
+    private drawMainTranslucent(graphicsRenderInfo: GraphicsRenderInfo, renderVariables: RenderVariables): void {
+        const builder = renderVariables.builder;
+        const opaqueColorResolveTextureID = assertExists(renderVariables.opaqueColorResolveTextureID);
+        const linearDepthResolveTextureID = assertExists(renderVariables.linearDepthResolveTextureID);
+
+        builder.pushPass((pass: any) => {
+            pass.setDebugName('Main Translucent');
+            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, renderVariables.hdrColorTargetID);
+            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, renderVariables.mainDepthTargetID);
+            pass.attachResolveTexture(opaqueColorResolveTextureID);
+            pass.attachResolveTexture(linearDepthResolveTextureID);
+            pass.exec((passRenderer: any, scope: any) => {
+                this.renderInstListTranslucent.resolveLateSamplerBinding(kLateBindingFramebuffer, {
+                    gfxTexture: scope.getResolveTextureForID(opaqueColorResolveTextureID),
+                    gfxSampler: null,
+                    lateBinding: null,
+                });
+                this.renderInstListTranslucent.resolveLateSamplerBinding(kLateBindingLinearDepth, {
+                    gfxTexture: scope.getResolveTextureForID(linearDepthResolveTextureID),
+                    gfxSampler: null,
+                    lateBinding: null,
+                });
+                this.renderInstListTranslucent.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
+            });
+        });
+    }
+
+    protected drawHdr(graphicsRenderInfo: GraphicsRenderInfo, renderVariables: RenderVariables, drawPlayer: boolean = true, isMirror: boolean = false): void {
+        this.simpleModelEnv.updateEnv(graphicsRenderInfo.viewerInput, this.getHdrComposeInvExposure(), this.graphicsQualityInfo, this.debugGlobalLodBiasOffset);
+
+        this.drawSky(renderVariables);
+        this.drawMainOpaque(renderVariables);
+
+        renderVariables.linearDepthTargetID = this.renderLinearDepth(
+            graphicsRenderInfo.device,
+            renderVariables.builder,
+            renderVariables.mainDepthTargetID,
+            graphicsRenderInfo.viewerInput,
+        );
+        renderVariables.linearDepthResolveTextureID = renderVariables.builder.resolveRenderTarget(renderVariables.linearDepthTargetID);
+
+        this.renderFog(
+            renderVariables.builder,
+            renderVariables.hdrColorTargetID,
+            renderVariables.linearDepthResolveTextureID,
+            graphicsRenderInfo.viewerInput,
+        );
+
+        renderVariables.opaqueColorResolveTextureID = renderVariables.builder.resolveRenderTarget(renderVariables.hdrColorTargetID);
+        this.drawMainTranslucent(graphicsRenderInfo, renderVariables);
+    }
+
+    protected drawView(graphicsRenderInfo: GraphicsRenderInfo, renderVariables: RenderVariables, drawPlayer: boolean = true, isMirror: boolean = false): void {
+        // TODO: Add mirror/sub-view handling
+        this.calcView(graphicsRenderInfo);
+        this.preDrawGraphics(graphicsRenderInfo);
+        this.drawSystem(graphicsRenderInfo, renderVariables);
+        this.drawHdr(graphicsRenderInfo, renderVariables, drawPlayer, isMirror);
+    }
+
     public render(device: GfxDevice, viewerInput: Viewer.ViewerRenderInput) {
         const renderInstManager = this.renderHelper.renderInstManager;
 
@@ -2248,7 +3037,6 @@ export class BasicFRESRenderer {
         hdrColorDesc.clearDepth = standardFullClearRenderPassDescriptor.clearDepth;
         hdrColorDesc.clearStencil = standardFullClearRenderPassDescriptor.clearStencil;
         
-        const ldrDesc = makeBackbufferDescSimple(GfxrAttachmentSlot.Color0, viewerInput, standardFullClearRenderPassDescriptor);
         // Screen-fetch/refraction samples this in the material HDR path, so it
         // must be an opaque-scene HDR snapshot, not the final LDR backbuffer.
         this.textureHolder.framebufferTexture.setDescription(device, hdrColorDesc);
@@ -2258,52 +3046,11 @@ export class BasicFRESRenderer {
         const hdrColorTargetID = builder.createRenderTargetID(hdrColorDesc, 'HDR Color');
         const mainDepthTargetID = builder.createRenderTargetID(mainDepthDesc, 'Main Depth');
 
-        const camera = viewerInput.camera;
-        camera.setClipPlanes(10, 1000000);
-        
-        // Sky first
-        builder.pushPass((pass) => {
-            pass.setDebugName('Sky');
-            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, hdrColorTargetID);
-            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
-            pass.exec((passRenderer) => {
-                this.renderInstListSky.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
-            });
-        });
-        
-        builder.pushPass((pass) => {
-            pass.setDebugName('Main Opaque');
-            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, hdrColorTargetID);
-            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
-            pass.exec((passRenderer) => {
-                this.renderInstListMain.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
-            });
-        });
+        const graphicsRenderInfo: GraphicsRenderInfo = { device, viewerInput, renderInstManager, viewIndex: 0 };
+        const renderVariables = new RenderVariables(builder, hdrColorTargetID, mainDepthTargetID);
 
-        const opaqueColorResolveTextureID = builder.resolveRenderTarget(hdrColorTargetID);
-        const linearDepthTargetID = this.renderLinearDepth(device, builder, mainDepthTargetID, viewerInput);
-        const linearDepthResolveTextureID = builder.resolveRenderTarget(linearDepthTargetID);
-
-        builder.pushPass((pass) => {
-            pass.setDebugName('Main Translucent');
-            pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, hdrColorTargetID);
-            pass.attachRenderTargetID(GfxrAttachmentSlot.DepthStencil, mainDepthTargetID);
-            pass.attachResolveTexture(opaqueColorResolveTextureID);
-            pass.attachResolveTexture(linearDepthResolveTextureID);
-            pass.exec((passRenderer, scope) => {
-                this.renderInstListTranslucent.resolveLateSamplerBinding(kLateBindingFramebuffer, {
-                    gfxTexture: scope.getResolveTextureForID(opaqueColorResolveTextureID),
-                    gfxSampler: null,
-                    lateBinding: null,
-                });
-                this.renderInstListTranslucent.resolveLateSamplerBinding(kLateBindingLinearDepth, {
-                    gfxTexture: scope.getResolveTextureForID(linearDepthResolveTextureID),
-                    gfxSampler: null,
-                    lateBinding: null,
-                });
-                this.renderInstListTranslucent.drawOnPassRenderer(this.renderHelper.renderCache, passRenderer);
-            });
-        });
+        this.clearRequest();
+        this.drawView(graphicsRenderInfo, renderVariables);
 
         // auto-exposure texture update
         this.updateCPUAutoExposure(viewerInput);
@@ -2312,7 +3059,7 @@ export class BasicFRESRenderer {
 
         this.renderHelper.antialiasingSupport.pushPasses(builder, viewerInput, finalColorTargetID);
 
-        builder.pushPass((pass) => {
+        builder.pushPass((pass: any) => {
             pass.setDebugName('Copy to Onscreen Texture');
             pass.attachRenderTargetID(GfxrAttachmentSlot.Color0, finalColorTargetID);
         });

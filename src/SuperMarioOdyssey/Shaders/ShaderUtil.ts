@@ -2,6 +2,9 @@ import { GfxShaderLibrary } from "../../gfx/helpers/GfxShaderLibrary";
 
 export function generateShaderUtil(): string {
     return `
+precision highp float;
+precision highp int;
+
 ${GfxShaderLibrary.MatrixLibrary}
 ${GfxShaderLibrary.saturate}
 
@@ -73,6 +76,37 @@ vec3 rotMtx34Vec3(Mat3x4 mtx, vec3 v)
     ret.y = dot3(mtx.my, v);
     ret.z = dot3(mtx.mz, v);
     return ret;
+}
+
+vec3 rotMtx33Vec3(in vec4 mtx[3], in vec3 v)
+{
+    vec3 ret;
+    ret.x = dot3(mtx[0], v);
+    ret.y = dot3(mtx[1], v);
+    ret.z = dot3(mtx[2], v);
+    return ret;
+}
+
+vec4 DecodeCubemap(samplerCube cube, vec3 n, float lod) {
+    vec4 tex = textureLod(cube, n, lod);
+    float scale = pow(tex.a, 4.0) * 1024.0;
+    return vec4(tex.rgb * scale, scale);
+}
+
+vec4 fetchCubeMap(samplerCube cube, vec3 dir, float bias) {
+    return textureLod(cube, dir, bias);
+}
+
+vec4 fetchCubeMapConvertHdr(samplerCube cube, vec3 dir, float bias) {
+    return DecodeCubemap(cube, dir, bias);
+}
+
+vec4 fetchCubeMapIrradiance(samplerCube cube, vec3 dir) {
+    return textureLod(cube, dir, 5.0);
+}
+
+vec4 fetchCubeMapIrradianceConvertHdr(samplerCube cube, vec3 dir) {
+    return DecodeCubemap(cube, dir, 5.0);
 }
 
 vec2 multMtx24Vec2(Mat2x4 mtx, vec2 v)

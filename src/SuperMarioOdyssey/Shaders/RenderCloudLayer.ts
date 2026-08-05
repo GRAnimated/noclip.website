@@ -33,16 +33,6 @@ void CalcLdrToHdr(out vec4 hdr, vec4 ldr) {
     hdr = vec4(ldr.rgb * scale, scale);
 }
 
-vec4 DecodeCubemap(samplerCube cube, vec3 n, float lod) {
-    vec4 tex = textureLod(cube, n, lod);
-    float scale = pow(tex.a, 4.0) * 1024.0;
-    return vec4(tex.rgb * scale, scale);
-}
-
-vec4 fetchCubeMapIrradianceConvertHdr(samplerCube cube, vec3 dir) {
-    return DecodeCubemap(cube, dir, 5.0);
-}
-
 float calcPhaseFunctionSchlick(float k, float cosTheta) {
     float tmp = 1.0 - k * cosTheta; // k > 0 => forward scatter, matching alMathUtil.glsl.
     return (1.0 - k*k) / (4.0 * PI * tmp * tmp);
@@ -141,13 +131,13 @@ void main() {
 
     vec4 albedoSample = texture(u_Texture0, albedoUV);
     vec4 normalSample = texture(u_Texture1, normalUV);
-    float density = albedoSample.r;
+    float density = albedoSample.a;
 
     vec3 Nw = normalize(v_NormalWorld);
     vec3 T = normalize(v_TangentsWorld.xyz);
     vec3 B = normalize(v_BitangentsWorld.xyz);
     mat3 TBN = mat3(T, B, Nw);
-    vec3 tangentNormal = reconstructNormal(normalSample.rg);
+    vec3 tangentNormal = normalize(mix(vec3(0.0, 0.0, 1.0), reconstructNormal(normalSample.rg), 0.25));
     Nw = normalize(TBN * tangentNormal);
     vec3 Nv = normalize(rotMtx34Vec3(mdlEnvView.cView, Nw));
 
@@ -162,10 +152,12 @@ void main() {
     vec3 baseColor = cloudMat.albedo.rgb;
     float alpha = density * cloudMat.albedo.a;
 
+    alpha *= 1.0 - smoothstep(0.70, 1.0, v_TexCoord0.y);
+
     if (${this.getShaderOptionBoolean('cIsMultVertexColor')}) {
         baseColor *= v_VtxColor.rgb;
-        alpha *= v_VtxColor.a;
     }
+    alpha *= v_VtxColor.a;
 
     vec3 irradiance = v_Irradiance.rgb;
     if (${this.getShaderOptionBoolean('cIsEnableSphereLight')}) {
@@ -174,7 +166,8 @@ void main() {
     }
 
     vec3 direct = v_LightColor.rgb * (diffuse + phase * cloudMat.uDiffuseScatterRatePow);
-    vec3 finalRGB = baseColor * (irradiance + direct);
+
+    vec3 finalRGB = baseColor * max(irradiance + direct, vec3(0.75));
 
     gl_FragColor = vec4(finalRGB, alpha * modelInfo.model_alpha_mask);
 }
